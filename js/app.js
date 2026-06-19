@@ -1,5 +1,7 @@
 import {
-  loadWorldCupData,
+  getBundledWorldCupData,
+  fetchLatestWorldCupData,
+  startAutoDataRefresh,
   filterByDays,
   sortMatchesByTime,
   getPreviousMatch,
@@ -25,7 +27,8 @@ const state = {
   selectedScenarioMatchId: "all",
   showPoints: localStorage.getItem("showPoints") !== "false",
   matches: [],
-  dataSource: "local",
+  dataSource: "bundled",
+  sourceLabel: "内置数据",
   subPage: null,
   subPageParent: null,
   scenarioContextMatch: null,
@@ -59,18 +62,36 @@ const DAY_FILTERS = [
 init();
 
 async function init() {
-  renderLoading();
   bindEvents();
 
-  try {
-    const data = await loadWorldCupData();
-    state.matches = data.matches;
-    state.dataSource = data.source;
-    render();
-  } catch (err) {
-    els.main.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>数据加载失败，请刷新重试</p></div>`;
-    console.error(err);
-  }
+  const bundled = getBundledWorldCupData();
+  state.matches = bundled.matches;
+  state.dataSource = bundled.source;
+  state.sourceLabel = bundled.sourceLabel;
+  render();
+
+  startAutoDataRefresh(applyFetchedData);
+}
+
+function applyFetchedData(data, { notify = false } = {}) {
+  const prevFresh = countFinished(state.matches);
+  const nextFresh = data.freshness ?? countFinished(data.matches);
+  const shouldUpdate =
+    nextFresh > prevFresh ||
+    (nextFresh === prevFresh && data.source !== "bundled" && state.dataSource === "bundled");
+
+  if (!shouldUpdate) return false;
+
+  state.matches = data.matches;
+  state.dataSource = data.source;
+  state.sourceLabel = data.sourceLabel;
+  render();
+  if (notify) showToast(`已更新（${data.sourceLabel}）`);
+  return true;
+}
+
+function countFinished(matches) {
+  return matches.filter((m) => m.finished).length;
 }
 
 function bindEvents() {
@@ -97,17 +118,14 @@ function bindEvents() {
       openThirdPlaceCompare();
       return;
     }
-    if (e.target.id === "refresh-btn") {
-      showToast("正在刷新…");
-      try {
-        const data = await loadWorldCupData();
-        state.matches = data.matches;
-        state.dataSource = data.source;
-        render();
-        showToast("数据已更新");
-      } catch {
-        showToast("刷新失败");
-      }
+    if (e.target.id !== "refresh-btn") return;
+    showToast("正在检索最新数据…");
+    try {
+      const data = await fetchLatestWorldCupData();
+      const updated = applyFetchedData(data, { notify: true });
+      if (!updated) showToast("已是最新数据");
+    } catch {
+      showToast("检索失败，仍使用当前数据");
     }
   });
 
@@ -667,8 +685,8 @@ function closeSubPage() {
 
 function dataSourceNote() {
   return `
-    <p class="data-source">数据来源：openfootball/worldcup.json · ${state.dataSource === "remote" ? "已同步最新" : "本地缓存"}</p>
-    <button class="refresh-btn" type="button" id="refresh-btn">刷新数据</button>
+    <p class="data-source">数据来源：openfootball · ${state.sourceLabel} · 每 3 分钟自动检索</p>
+    <button class="refresh-btn" type="button" id="refresh-btn">立即检索</button>
   `;
 }
 

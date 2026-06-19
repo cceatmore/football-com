@@ -1,4 +1,4 @@
-/** 球队名称 → ISO 3166-1 alpha-2（用于 flagcdn） */
+/** 球队名称 → ISO 3166-1 alpha-2（用于 emoji 国旗） */
 export const TEAM_ISO = {
   Mexico: "mx",
   "South Africa": "za",
@@ -109,13 +109,19 @@ export function teamLabel(name) {
   return TEAM_ZH[name] || name;
 }
 
-export function flagHtml(name, size = 24) {
+function teamFlagEmoji(name) {
   const iso = TEAM_ISO[name];
-  if (!iso) {
-    return `<span class="team-flag placeholder" style="width:${size}px;height:${Math.round(size * 0.75)}px">⚽</span>`;
-  }
+  if (!iso) return "⚽";
+  if (iso === "gb-eng" || iso === "gb-sct") return "🏴";
+  const cc = iso.split("-")[0].toUpperCase();
+  if (cc.length !== 2) return "⚽";
+  return String.fromCodePoint(...[...cc].map((c) => 0x1f1e6 - 65 + c.charCodeAt(0)));
+}
+
+export function flagHtml(name, size = 24) {
+  const emoji = teamFlagEmoji(name);
   const h = Math.round(size * 0.75);
-  return `<img class="team-flag" src="https://flagcdn.com/w40/${iso}.png" srcset="https://flagcdn.com/w80/${iso}.png 2x" width="${size}" height="${h}" alt="" loading="lazy">`;
+  return `<span class="team-flag team-flag-emoji" style="width:${size}px;height:${h}px;font-size:${Math.round(size * 0.72)}px" aria-hidden="true">${emoji}</span>`;
 }
 
 export function teamInlineHtml(name, size = 18) {

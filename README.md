@@ -35,9 +35,27 @@ npx serve .
 
 ## 数据来源
 
-- 赛程与比分：[openfootball/worldcup.json](https://github.com/openfootball/worldcup.json)（公共领域）
-- 国旗图标：[flagcdn.com](https://flagcdn.com)
-- 页面优先从 GitHub 拉取最新 JSON，失败时使用本地 `data/worldcup.json`
+- 原始数据：[openfootball/worldcup.json](https://github.com/openfootball/worldcup.json)（公共领域）
+- 内置备份：`data/worldcup.json`（打开页面立即可用）
+- 国旗：Unicode emoji（无需外网 CDN）
+
+### 自动检索
+
+页面会**并行请求多个镜像**，自动选用完赛场次最多的一份：
+
+| 优先级 | 来源 |
+|--------|------|
+| 同站 | `./data/worldcup.json` |
+| 国内镜像 | `cdn.jsdmirror.com`（jsDelivr 国内节点） |
+| CDN | jsDelivr、Statically |
+| GitHub 加速 | ghproxy.net、gh-proxy.com |
+| 原始 | raw.githubusercontent.com |
+
+- 打开页面：先显示内置数据，后台自动检索更新
+- 每 **3 分钟**自动检索一次（切回页面时也会触发）
+- 可点「立即检索」手动更新
+
+更新内置备份：在可访问外网的环境下载最新 JSON 覆盖 `data/worldcup.json` 后推送。
 
 ## 技术说明
 

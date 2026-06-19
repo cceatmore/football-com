@@ -1,8 +1,34 @@
 import { isRealTeam } from "./teams.js";
+import bundledData from "../data/worldcup.json" with { type: "json" };
 
-const REMOTE_URL =
+const GITHUB_RAW =
   "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json";
-const LOCAL_URL = "./data/worldcup.json";
+
+/** 多源检索：并行请求，取完赛场次最多的一份 */
+const DATA_SOURCES = [
+  { id: "local", url: "./data/worldcup.json", label: "同站缓存" },
+  {
+    id: "jsdmirror",
+    url: "https://cdn.jsdmirror.com/gh/openfootball/worldcup.json@master/2026/worldcup.json",
+    label: "jsDelivr 国内镜像",
+  },
+  {
+    id: "jsdelivr",
+    url: "https://cdn.jsdelivr.net/gh/openfootball/worldcup.json@master/2026/worldcup.json",
+    label: "jsDelivr",
+  },
+  {
+    id: "statically",
+    url: "https://cdn.statically.io/gh/openfootball/worldcup.json/master/2026/worldcup.json",
+    label: "Statically CDN",
+  },
+  { id: "ghproxy", url: `https://ghproxy.net/${GITHUB_RAW}`, label: "GitHub 镜像" },
+  { id: "ghproxy2", url: `https://gh-proxy.com/${GITHUB_RAW}`, label: "GitHub 加速" },
+  { id: "github", url: GITHUB_RAW, label: "GitHub 原始" },
+];
+
+const FETCH_TIMEOUT_MS = 6000;
+const AUTO_REFRESH_MS = 3 * 60 * 1000;
 
 /** 解析 openfootball 时间格式，返回 Date（UTC）与北京时间的展示字符串 */
 export function parseMatchTime(dateStr, timeStr) {
@@ -74,28 +100,102 @@ export function normalizeMatch(raw, index) {
   };
 }
 
-export async function loadWorldCupData() {
-  let source = "local";
-  let raw;
+function isValidWorldCupJson(raw) {
+  return Boolean(raw?.matches?.length >= 50 && raw?.name);
+}
 
+function freshnessScore(raw) {
+  return raw.matches.filter((m) => m.score?.ft).length;
+}
+
+function packRaw(raw, source, sourceLabel) {
+  return {
+    name: raw.name,
+    matches: raw.matches.map(normalizeMatch),
+    source,
+    sourceLabel,
+    freshness: freshnessScore(raw),
+  };
+}
+
+async function fetchSource(source) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(REMOTE_URL, { cache: "no-cache" });
-    if (res.ok) {
-      raw = await res.json();
-      source = "remote";
-    }
+    const res = await fetch(source.url, { cache: "no-cache", signal: controller.signal });
+    if (!res.ok) return null;
+    const raw = await res.json();
+    if (!isValidWorldCupJson(raw)) return null;
+    return {
+      raw,
+      source: source.id,
+      sourceLabel: source.label,
+      freshness: freshnessScore(raw),
+    };
   } catch {
-    /* fallback */
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
+}
 
-  if (!raw) {
-    const res = await fetch(LOCAL_URL);
-    raw = await res.json();
-    source = "local";
+async function fetchAllSources() {
+  const results = await Promise.all(DATA_SOURCES.map((source) => fetchSource(source)));
+  return results.filter(Boolean);
+}
+
+/** 内置数据，打开页面立即可用 */
+export function getBundledWorldCupData() {
+  return packRaw(bundledData, "bundled", "内置数据");
+}
+
+/** 并行检索全部数据源，自动选取最新的一份 */
+export async function fetchLatestWorldCupData() {
+  const bundled = getBundledWorldCupData();
+  const results = await fetchAllSources();
+  if (results.length === 0) return bundled;
+
+  const best = results.sort((a, b) => b.freshness - a.freshness)[0];
+  if (best.freshness >= bundled.freshness) {
+    return packRaw(best.raw, best.source, best.sourceLabel);
   }
+  return bundled;
+}
 
-  const matches = raw.matches.map(normalizeMatch);
-  return { name: raw.name, matches, source };
+/** @deprecated 使用 fetchLatestWorldCupData */
+export async function loadWorldCupData() {
+  return fetchLatestWorldCupData();
+}
+
+/** 后台定时自动检索；onUpdate 在拿到更优数据时回调 */
+export function startAutoDataRefresh(onUpdate, intervalMs = AUTO_REFRESH_MS) {
+  let busy = false;
+
+  const tick = async () => {
+    if (busy || document.visibilityState === "hidden") return;
+    busy = true;
+    try {
+      const data = await fetchLatestWorldCupData();
+      onUpdate(data);
+    } catch {
+      /* 静默失败，保留当前数据 */
+    } finally {
+      busy = false;
+    }
+  };
+
+  const onVisible = () => {
+    if (document.visibilityState === "visible") tick();
+  };
+
+  tick();
+  const timer = setInterval(tick, intervalMs);
+  document.addEventListener("visibilitychange", onVisible);
+
+  return () => {
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", onVisible);
+  };
 }
 
 export function getGroupTeams(matches, groupLetter) {
