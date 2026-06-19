@@ -16,6 +16,9 @@ import {
   flagHtml,
   teamLabel,
   teamInlineHtml,
+  teamDetailHtml,
+  formatFifaRank,
+  getFifaRank,
   enrichTextWithTeamFlags,
   isRealTeam,
 } from "./teams.js";
@@ -260,6 +263,7 @@ function formatPtsInline(points, rank) {
 function matchCardHtml(m, mode = "schedule", opts = {}) {
   const showPoints = mode === "schedule" ? state.showPoints : true;
   const showRank = opts.showRank === true;
+  const showFifaRank = opts.showFifaRank === true;
   const homePts =
     m.group && isRealTeam(m.home)
       ? getTeamPoints(state.matches, m.home, m.group)
@@ -294,9 +298,9 @@ function matchCardHtml(m, mode = "schedule", opts = {}) {
     <article class="match-card ${m.finished ? "finished" : ""}${staticCard ? " match-card--static" : ""}"${staticCard ? "" : ` data-match-id="${m.id}" data-mode="${mode}"`}>
       <div class="match-card-line${hideGroup ? " match-card-line--no-group" : ""}">
         ${hideGroup ? "" : `<span class="group-badge">${groupLabel}</span>`}
-        ${teamInline(m.home, homePts, showPoints, m.finished ? m.homeScore : null, "home", homeRank)}
+        ${teamInline(m.home, homePts, showPoints, m.finished ? m.homeScore : null, "home", homeRank, showFifaRank)}
         <span class="match-vs">VS</span>
-        ${teamInline(m.away, awayPts, showPoints, m.finished ? m.awayScore : null, "away", awayRank)}
+        ${teamInline(m.away, awayPts, showPoints, m.finished ? m.awayScore : null, "away", awayRank, showFifaRank)}
         <span class="match-time">${m.beijingTime || "待定"}</span>
       </div>
       ${scenarioTags ? `<div class="scenario-summary">${scenarioTags}</div>` : ""}
@@ -304,16 +308,20 @@ function matchCardHtml(m, mode = "schedule", opts = {}) {
   `;
 }
 
-function teamInline(name, points, showPoints, score, side, rank = null) {
+function teamInline(name, points, showPoints, score, side, rank = null, showFifa = false) {
   const pts =
     showPoints && points !== null
       ? `<span class="team-pts">${formatPtsInline(points, rank)}</span>`
       : "";
   const scoreHtml =
     score !== null ? `<span class="team-score-inline">${score}</span>` : "";
+  const fifaHtml =
+    showFifa && getFifaRank(name)
+      ? `<span class="team-fifa">FIFA ${getFifaRank(name)}</span>`
+      : "";
   const nameBlock = `
     <span class="team-name-scroll">
-      <span class="team-name-track">${teamLabel(name)}${pts}${scoreHtml}</span>
+      <span class="team-name-track">${teamLabel(name)}${fifaHtml}${pts}${scoreHtml}</span>
     </span>`;
   const flag = flagHtml(name, 22);
 
@@ -482,6 +490,11 @@ function openMatchDetail(match) {
   const pts = match.group ? getTeamPoints(state.matches, team, match.group) : 0;
   const rank = match.group ? getTeamGroupRank(state.matches, team, match.group) : null;
   const prevScore = prev ? matchScoreDetail(prev) : null;
+  const prevOpponent = prev ? (prev.home === team ? prev.away : prev.home) : null;
+  const nextOpponent = next ? (next.home === team ? next.away : next.home) : null;
+  const fifaText = formatFifaRank(team);
+  const groupMeta = match.group ? `${match.group} 组 · 当前 ${formatPtsLabel(pts, rank)}` : match.round;
+  const heroMeta = [fifaText, groupMeta].filter(Boolean).join(" · ");
 
   els.subTitle.textContent = "球队详情";
   els.subContent.innerHTML = `
@@ -489,7 +502,7 @@ function openMatchDetail(match) {
       ${flagHtml(team, 40)}
       <div>
         <div class="name">${teamLabel(team)}</div>
-        <div class="meta">${match.group ? `${match.group} 组 · 当前 ${formatPtsLabel(pts, rank)}` : match.round}</div>
+        <div class="meta">${heroMeta}</div>
       </div>
     </div>
 
@@ -498,7 +511,7 @@ function openMatchDetail(match) {
       ${
         prev
           ? `
-        <div class="detail-row"><span class="label">对手</span><span class="value">${flagHtml(prev.home === team ? prev.away : prev.home, 20)} ${teamLabel(prev.home === team ? prev.away : prev.home)}</span></div>
+        <div class="detail-row"><span class="label">对手</span><span class="value">${teamDetailHtml(prevOpponent)}</span></div>
         <div class="detail-row"><span class="label">北京时间</span><span class="value">${prev.beijingFull}</span></div>
         <div class="detail-row"><span class="label">比分</span><span class="value">${prevScore}</span></div>
       `
@@ -508,7 +521,7 @@ function openMatchDetail(match) {
 
     <div class="detail-match-current">
       <h3>📋 当前比赛</h3>
-      ${matchCardHtml(match, "schedule", { static: true, showRank: true, hideGroup: true })}
+      ${matchCardHtml(match, "schedule", { static: true, showRank: true, showFifaRank: true, hideGroup: true })}
     </div>
 
     <div class="detail-card detail-card--next">
@@ -516,7 +529,7 @@ function openMatchDetail(match) {
       ${
         next
           ? `
-        <div class="detail-row"><span class="label">对手</span><span class="value">${flagHtml(next.home === team ? next.away : next.home, 20)} ${teamLabel(next.home === team ? next.away : next.home)}</span></div>
+        <div class="detail-row"><span class="label">对手</span><span class="value">${teamDetailHtml(nextOpponent)}</span></div>
         <div class="detail-row"><span class="label">北京时间</span><span class="value">${next.beijingFull}</span></div>
         ${next.ground ? `<div class="detail-row"><span class="label">球场</span><span class="value">${next.ground}</span></div>` : ""}
       `

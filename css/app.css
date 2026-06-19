@@ -835,8 +835,31 @@ html, body {
 }
 
 .detail-row .value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
   text-align: right;
   font-weight: 500;
+}
+
+.detail-row .value .team-detail-name {
+  margin-right: 4px;
+}
+
+.fifa-rank {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.team-fifa {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-left: 2px;
 }
 
 .hero-team {
