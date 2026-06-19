@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f8fa">
+  <meta name="description" content="2026  FIFA 世界杯赛程、积分榜与出线形势分析">
+  <title>2026 世界杯</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <h1 id="page-title">赛程</h1>
+      <p class="app-subtitle" id="page-subtitle">2026 FIFA 世界杯 · 北京时间</p>
+    </header>
+
+    <main class="app-main" id="main-content"></main>
+
+    <nav class="tab-bar" id="tab-bar">
+      <button class="tab-item active" data-tab="schedule" type="button">
+        <span class="tab-icon">📅</span>
+        <span>赛程</span>
+      </button>
+      <button class="tab-item" data-tab="standings" type="button">
+        <span class="tab-icon">📊</span>
+        <span>积分榜</span>
+      </button>
+      <button class="tab-item" data-tab="scenarios" type="button">
+        <span class="tab-icon">🎯</span>
+        <span>出线分析</span>
+      </button>
+    </nav>
+  </div>
+
+  <div id="sub-page" class="sub-page hidden" aria-hidden="true">
+    <header class="sub-header">
+      <button class="back-btn" id="back-btn" type="button" aria-label="返回">←</button>
+      <h2 id="sub-title">详情</h2>
+    </header>
+    <main class="sub-main" id="sub-content"></main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
