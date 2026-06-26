@@ -165,7 +165,7 @@ export function formatFifaRank(name) {
 export function teamDetailHtml(name, flagSize = 20) {
   const rankText = formatFifaRank(name);
   const rankHtml = rankText ? `<span class="fifa-rank">${rankText}</span>` : "";
-  return `${flagHtml(name, flagSize)} <span class="team-detail-name">${teamLabel(name)}</span>${rankHtml}`;
+  return `${flagHtml(name, flagSize)} <span class="team-detail-col"><span class="team-detail-name">${teamLabel(name)}</span>${rankHtml}</span>`;
 }
 
 export function isRealTeam(name) {

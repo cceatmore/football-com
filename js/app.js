@@ -4,13 +4,17 @@ import {
   startAutoDataRefresh,
   filterByDays,
   sortMatchesByTime,
-  getPreviousMatch,
-  getNextMatch,
-  matchScoreDetail,
+  getPreviousGroupMatches,
+  getTeamMatches,
+  getMatchOpponent,
+  getGroupRoundIndex,
+  formatMatchupHtml,
+  formatMatchupText,
   formatDateSectionLabel,
 } from "./data.js";
 import { computeAllStandings, getTeamPoints, getTeamGroupRank } from "./standings.js";
 import { analyzeMatchScenario, STATUS_META } from "./scenarios.js";
+import { computeKnockoutOutlook, formatKnockoutOutlookHtml } from "./knockout.js";
 import { analyzeThirdPlaceRace, THIRD_PLACE_SLOTS } from "./thirdPlace.js";
 import {
   flagHtml,
@@ -29,6 +33,8 @@ const state = {
   scenarioDayFilter: "all",
   selectedScenarioMatchId: "all",
   showPoints: localStorage.getItem("showPoints") !== "false",
+  showFifaRank: localStorage.getItem("showFifaRank") !== "false",
+  standingsExpandedTeam: null,
   matches: [],
   dataSource: "bundled",
   sourceLabel: "内置数据",
@@ -66,14 +72,22 @@ init();
 
 async function init() {
   bindEvents();
+  renderLoading();
 
-  const bundled = getBundledWorldCupData();
-  state.matches = bundled.matches;
-  state.dataSource = bundled.source;
-  state.sourceLabel = bundled.sourceLabel;
-  render();
-
-  startAutoDataRefresh(applyFetchedData);
+  try {
+    const bundled = await getBundledWorldCupData();
+    state.matches = bundled.matches;
+    state.dataSource = bundled.source;
+    state.sourceLabel = bundled.sourceLabel;
+    render();
+    startAutoDataRefresh(applyFetchedData);
+    fetchLatestWorldCupData()
+      .then((data) => applyFetchedData(data))
+      .catch(() => {});
+  } catch (err) {
+    els.main.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>数据加载失败，请刷新重试</p><p class="detail-note">若持续失败，请确认通过完整地址访问：<br><code>/football-com/</code></p></div>`;
+    console.error(err);
+  }
 }
 
 function applyFetchedData(data, { notify = false } = {}) {
@@ -203,7 +217,7 @@ function renderSchedule() {
 
   els.main.innerHTML = html;
   bindFilterBar(els.main, "dayFilter");
-  bindPointsSwitch(els.main);
+  bindScheduleSwitches(els.main);
   bindMatchCards(els.main);
   scheduleTeamNameMarquee(els.main);
 }
@@ -212,23 +226,40 @@ function renderScheduleToolbar(currentFilter) {
   return `
     <div class="schedule-toolbar">
       ${renderFilterBar(currentFilter)}
-      <label class="switch-wrap" title="显示球队积分">
-        <span class="switch-label">积分</span>
-        <input type="checkbox" id="show-points-switch" ${state.showPoints ? "checked" : ""}>
-        <span class="switch-track" aria-hidden="true"></span>
-      </label>
+      <div class="schedule-switches">
+        <label class="switch-wrap" title="显示球队积分">
+          <span class="switch-label">积分</span>
+          <input type="checkbox" id="show-points-switch" ${state.showPoints ? "checked" : ""}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <label class="switch-wrap" title="显示 FIFA 世界排名">
+          <span class="switch-label">排名</span>
+          <input type="checkbox" id="show-fifa-switch" ${state.showFifaRank ? "checked" : ""}>
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+      </div>
     </div>
   `;
 }
 
-function bindPointsSwitch(container) {
-  const input = container.querySelector("#show-points-switch");
-  if (!input) return;
-  input.addEventListener("change", () => {
-    state.showPoints = input.checked;
-    localStorage.setItem("showPoints", String(state.showPoints));
-    renderSchedule();
-  });
+function bindScheduleSwitches(container) {
+  const pointsInput = container.querySelector("#show-points-switch");
+  if (pointsInput) {
+    pointsInput.addEventListener("change", () => {
+      state.showPoints = pointsInput.checked;
+      localStorage.setItem("showPoints", String(state.showPoints));
+      renderSchedule();
+    });
+  }
+
+  const fifaInput = container.querySelector("#show-fifa-switch");
+  if (fifaInput) {
+    fifaInput.addEventListener("change", () => {
+      state.showFifaRank = fifaInput.checked;
+      localStorage.setItem("showFifaRank", String(state.showFifaRank));
+      renderSchedule();
+    });
+  }
 }
 
 function groupMatchesByDate(matches) {
@@ -263,7 +294,7 @@ function formatPtsInline(points, rank) {
 function matchCardHtml(m, mode = "schedule", opts = {}) {
   const showPoints = mode === "schedule" ? state.showPoints : true;
   const showRank = opts.showRank === true;
-  const showFifaRank = opts.showFifaRank === true;
+  const showFifaRank = opts.showFifaRank ?? (mode === "schedule" && state.showFifaRank);
   const homePts =
     m.group && isRealTeam(m.home)
       ? getTeamPoints(state.matches, m.home, m.group)
@@ -320,8 +351,11 @@ function teamInline(name, points, showPoints, score, side, rank = null, showFifa
       ? `<span class="team-fifa">FIFA ${getFifaRank(name)}</span>`
       : "";
   const nameBlock = `
-    <span class="team-name-scroll">
-      <span class="team-name-track">${teamLabel(name)}${fifaHtml}${pts}${scoreHtml}</span>
+    <span class="team-name-stack">
+      <span class="team-name-scroll">
+        <span class="team-name-track">${teamLabel(name)}${pts}${scoreHtml}</span>
+      </span>
+      ${fifaHtml}
     </span>`;
   const flag = flagHtml(name, 22);
 
@@ -386,6 +420,61 @@ function renderStandings() {
     groups.map((g) => standingsGroupHtml(g)).join(""),
     dataSourceNote(),
   ].join("");
+  bindStandingsRows(els.main);
+}
+
+function teamMatchResultLabel(match, team) {
+  if (!match.finished) return "未赛";
+  const isHome = match.home === team;
+  const gf = isHome ? match.homeScore : match.awayScore;
+  const ga = isHome ? match.awayScore : match.homeScore;
+  if (gf > ga) return "胜";
+  if (gf < ga) return "负";
+  return "平";
+}
+
+function standingsMatchItemHtml(match, team) {
+  const roundLabel = match.group
+    ? `小组赛 · 第${getGroupRoundIndex(state.matches, team, match) ?? "-"}轮`
+    : match.round;
+  const result = teamMatchResultLabel(match, team);
+  const resultClass =
+    result === "胜" ? "win" : result === "负" ? "loss" : result === "平" ? "draw" : "pending";
+  const body = match.finished
+    ? formatMatchupText(match)
+    : `${teamLabel(match.home)} vs ${teamLabel(match.away)}（未赛）`;
+
+  return `
+    <div class="standings-match-item">
+      <div class="standings-match-meta">
+        <span class="standings-match-round">${roundLabel}</span>
+        <span class="standings-match-result ${resultClass}">${result}</span>
+      </div>
+      <div class="standings-match-body">${body}</div>
+    </div>`;
+}
+
+function standingsTeamMatchesHtml(team) {
+  const matches = getTeamMatches(state.matches, team);
+  if (matches.length === 0) {
+    return '<p class="standings-matches-empty">暂无比赛记录</p>';
+  }
+  return `<div class="standings-matches-list">${matches.map((m) => standingsMatchItemHtml(m, team)).join("")}</div>`;
+}
+
+function bindStandingsRows(container) {
+  container.querySelectorAll(".standings-team-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const team = row.dataset.team;
+      if (!team) return;
+      if (state.standingsExpandedTeam === team) {
+        state.standingsExpandedTeam = null;
+      } else {
+        state.standingsExpandedTeam = team;
+      }
+      renderStandings();
+    });
+  });
 }
 
 function standingsGroupHtml({ group, rows }) {
@@ -409,11 +498,18 @@ function standingsGroupHtml({ group, rows }) {
         </thead>
         <tbody>
           ${rows
-            .map(
-              (r, i) => `
-            <tr class="${i < 2 ? "qualified" : i === 2 ? "possible" : ""}">
+            .map((r, i) => {
+              const expanded = state.standingsExpandedTeam === r.team;
+              return `
+            <tr class="standings-team-row ${i < 2 ? "qualified" : i === 2 ? "possible" : ""}${expanded ? " expanded" : ""}" data-team="${r.team}" aria-expanded="${expanded}">
               <td class="rank">${i + 1}</td>
-              <td><div class="team-cell">${flagHtml(r.team, 20)}${teamLabel(r.team)}</div></td>
+              <td>
+                <div class="team-cell">
+                  ${flagHtml(r.team, 20)}
+                  <span class="team-cell-name">${teamLabel(r.team)}</span>
+                  <span class="standings-expand-icon" aria-hidden="true"></span>
+                </div>
+              </td>
               <td>${r.mp}</td>
               <td>${r.w}</td>
               <td>${r.d}</td>
@@ -423,8 +519,15 @@ function standingsGroupHtml({ group, rows }) {
               <td>${r.gd > 0 ? "+" + r.gd : r.gd}</td>
               <td class="pts">${r.pts}</td>
             </tr>
-          `
-            )
+            <tr class="standings-detail-row${expanded ? "" : " hidden"}" data-team="${r.team}">
+              <td colspan="10">
+                <div class="standings-matches-panel">
+                  <div class="standings-matches-title">本届世界杯战绩</div>
+                  ${standingsTeamMatchesHtml(r.team)}
+                </div>
+              </td>
+            </tr>`;
+            })
             .join("")}
         </tbody>
       </table>
@@ -483,18 +586,34 @@ function renderScenarios() {
   });
 }
 
+function renderPrevResultsBlock(prevMatches, team) {
+  if (prevMatches.length === 0) {
+    return `<p class="detail-empty">暂无已完成的前两轮比赛</p>`;
+  }
+  return prevMatches
+    .map((prev) => {
+      const round = getGroupRoundIndex(state.matches, team, prev);
+      const title = round ? `第${round}轮` : "上轮";
+      return `
+        <div class="detail-round-block">
+          <div class="detail-row detail-row--matchup">
+            <span class="label">${title}</span>
+            <span class="value">${formatMatchupHtml(prev, team)}</span>
+          </div>
+        </div>`;
+    })
+    .join("");
+}
+
 function openMatchDetail(match) {
   const team = match.home;
-  const prev = getPreviousMatch(state.matches, team, match);
-  const next = getNextMatch(state.matches, team, match);
+  const prevMatches = getPreviousGroupMatches(state.matches, team, match, 2);
   const pts = match.group ? getTeamPoints(state.matches, team, match.group) : 0;
   const rank = match.group ? getTeamGroupRank(state.matches, team, match.group) : null;
-  const prevScore = prev ? matchScoreDetail(prev) : null;
-  const prevOpponent = prev ? (prev.home === team ? prev.away : prev.home) : null;
-  const nextOpponent = next ? (next.home === team ? next.away : next.home) : null;
   const fifaText = formatFifaRank(team);
   const groupMeta = match.group ? `${match.group} 组 · 当前 ${formatPtsLabel(pts, rank)}` : match.round;
   const heroMeta = [fifaText, groupMeta].filter(Boolean).join(" · ");
+  const knockoutOutlook = computeKnockoutOutlook(state.matches, match, team);
 
   els.subTitle.textContent = "球队详情";
   els.subContent.innerHTML = `
@@ -507,34 +626,19 @@ function openMatchDetail(match) {
     </div>
 
     <div class="detail-card detail-card--prev">
-      <h3>⏮ 上一轮战绩</h3>
-      ${
-        prev
-          ? `
-        <div class="detail-row"><span class="label">对手</span><span class="value">${teamDetailHtml(prevOpponent)}</span></div>
-        <div class="detail-row"><span class="label">北京时间</span><span class="value">${prev.beijingFull}</span></div>
-        <div class="detail-row"><span class="label">比分</span><span class="value">${prevScore}</span></div>
-      `
-          : `<p class="detail-empty">暂无已完成的上轮比赛</p>`
-      }
+      <h3>⏮ 前两轮战绩</h3>
+      ${renderPrevResultsBlock(prevMatches, team)}
     </div>
 
     <div class="detail-match-current">
-      <h3>📋 当前比赛</h3>
-      ${matchCardHtml(match, "schedule", { static: true, showRank: true, showFifaRank: true, hideGroup: true })}
+      <h3>📋 当前比赛（第${getGroupRoundIndex(state.matches, team, match) ?? "?"}轮）</h3>
+      ${matchCardHtml(match, "schedule", { static: true, showRank: true, showFifaRank: state.showFifaRank, hideGroup: true })}
     </div>
 
-    <div class="detail-card detail-card--next">
-      <h3>⏭ 下一轮比赛</h3>
-      ${
-        next
-          ? `
-        <div class="detail-row"><span class="label">对手</span><span class="value">${teamDetailHtml(nextOpponent)}</span></div>
-        <div class="detail-row"><span class="label">北京时间</span><span class="value">${next.beijingFull}</span></div>
-        ${next.ground ? `<div class="detail-row"><span class="label">球场</span><span class="value">${next.ground}</span></div>` : ""}
-      `
-          : `<p class="detail-empty">该队暂无后续小组赛程</p>`
-      }
+    <div class="detail-card detail-card--knockout">
+      <h3>🎯 本场结果 · 32强对阵预测</h3>
+      <p class="detail-note">基于本场胜/平/负，结合各组剩余场次全枚举推算。</p>
+      ${formatKnockoutOutlookHtml(knockoutOutlook)}
     </div>
   `;
 
@@ -659,10 +763,17 @@ function scenarioTeamBlock(team, analysis, match) {
     .filter(Boolean)
     .join(" · ");
 
-  const contextLines = [ctx.prevSummary, ctx.nextSummary]
+  const contextLines = [
+    ...(ctx.prevSummaries || []),
+    ctx.opponentLabel ? `本场${ctx.isHome ? "主场" : "客场"}对阵 ${ctx.opponentLabel}。` : "",
+  ]
     .filter(Boolean)
     .map((line) => enrichTextWithTeamFlags(line, 18))
     .join("<br>");
+
+  const knockoutHtml = analysis.knockoutOutlook
+    ? `<div class="knockout-block"><strong>32强预测</strong>${formatKnockoutOutlookHtml(analysis.knockoutOutlook)}</div>`
+    : "";
 
   const gdRivalsText =
     analysis.gdRivals?.length > 0
@@ -677,6 +788,7 @@ function scenarioTeamBlock(team, analysis, match) {
     <div class="scenario-block ${meta.className}${analysis.gdNeeded ? " has-gd" : ""}">
       <h4>${teamInlineHtml(team, 22)} · ${analysis.label}${analysis.gdNeeded && analysis.gdLabel ? ` · ${analysis.gdLabel}` : ""}</h4>
       ${contextLines ? `<div class="scenario-context">${contextLines}</div>` : ""}
+      ${knockoutHtml}
       <p>${enrichTextWithTeamFlags(analysis.desc, 18)}</p>
       <div class="hint">${rankText}${pts} 分 · 净胜球 ${gdText}（${match.group} 组）${outcomes ? "<br>" + outcomes : ""}</div>
       ${gdDetail}

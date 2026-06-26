@@ -4,10 +4,11 @@ import {
   rankInGroup,
 } from "./standings.js";
 import {
-  getPreviousMatch,
-  getNextMatch,
-  matchScoreDetail,
+  getPreviousGroupMatches,
+  formatPrevResultSummary,
+  getMatchOpponent,
 } from "./data.js";
+import { computeKnockoutOutlook } from "./knockout.js";
 import { isRealTeam, teamLabel } from "./teams.js";
 
 const SHOW_ON_CARD = new Set([
@@ -68,23 +69,16 @@ function finalizeResult(base, gdInfo, context) {
 
 function buildMatchContext(matches, team, targetMatch) {
   const group = targetMatch.group;
-  const prev = getPreviousMatch(matches, team, targetMatch);
-  const next = getNextMatch(matches, team, targetMatch);
+  const prevMatches = getPreviousGroupMatches(matches, team, targetMatch, 2);
   const rows = computeStandings(matches, group);
   const rank = rankInGroup(rows, team);
   const row = rows.find((r) => r.team === team);
-  const opponent = targetMatch.home === team ? targetMatch.away : targetMatch.home;
+  const opponent = getMatchOpponent(targetMatch, team);
 
-  const prevSummary = prev
-    ? `上轮 ${matchScoreDetail(prev)}，对手 ${teamLabel(prev.home === team ? prev.away : prev.home)}`
-    : "首轮出战，暂无上轮战绩";
-
-  const nextSummary =
-    next && next.id !== targetMatch.id
-      ? `末轮对阵 ${teamLabel(next.home === team ? next.away : next.home)}（${next.beijingFull}）`
-      : next && next.id === targetMatch.id
-        ? "本场为小组末轮"
-        : "暂无后续小组赛";
+  const prevSummaries =
+    prevMatches.length > 0
+      ? prevMatches.map((p) => formatPrevResultSummary(matches, p, team))
+      : ["首轮出战，暂无前两轮战绩"];
 
   const rivalForSecond = rows
     .filter((r) => r.team !== team)
@@ -96,16 +90,14 @@ function buildMatchContext(matches, team, targetMatch) {
     .find((r) => Math.abs(r.pts - (row?.pts ?? 0)) <= 3);
 
   return {
-    prev,
-    next,
+    prevMatches,
+    prevSummaries,
     rank,
     pts: row?.pts ?? 0,
     gd: row?.gd ?? 0,
     opponent,
     opponentLabel: teamLabel(opponent),
     isHome: targetMatch.home === team,
-    prevSummary,
-    nextSummary,
     rivalLabel: rivalForSecond ? teamLabel(rivalForSecond.team) : null,
     rivalPts: rivalForSecond?.pts,
     rivalGd: rivalForSecond?.gd,
@@ -230,8 +222,7 @@ function outcomeSummary(winOk, drawOk, lossOk) {
 
 export function analyzeTeamScenario(matches, targetMatch, team) {
   const emptyContext = {
-    prevSummary: "",
-    nextSummary: "",
+    prevSummaries: [],
     rank: null,
     pts: 0,
     gd: 0,
@@ -255,10 +246,9 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
       isRealTeam(m.away)
   );
 
-  const contextPrefix = `${context.prevSummary}。本场${context.isHome ? "主场" : "客场"}对阵 ${context.opponentLabel}。${context.nextSummary}。`;
-
   if (!remaining.some((m) => m.home === team || m.away === team)) {
     const rank = rankInGroup(computeStandings(matches, group), team);
+    const knockoutOutlook = computeKnockoutOutlook(matches, targetMatch, team);
     const gdBase = {
       gdNeeded: false,
       gdLabel: null,
@@ -272,7 +262,8 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
         {
           status: "confirmed",
           label: "已确认出线",
-          desc: `${contextPrefix}已锁定小组前两名。`,
+          desc: "已锁定小组前两名。",
+          knockoutOutlook,
         },
         gdBase,
         context
@@ -282,7 +273,8 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
       {
         status: "eliminated",
         label: "已出局",
-        desc: `${contextPrefix}已无法进入小组前两名。`,
+        desc: "已无法进入小组前两名。",
+        knockoutOutlook,
       },
       gdBase,
       context
@@ -343,7 +335,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "confirmed",
       label: "已确认出线",
-      desc: `${contextPrefix}即使本场失利仍可确保小组前二。`,
+      desc: "即使本场失利仍可确保小组前二。",
       winOk,
       drawOk,
       lossOk,
@@ -352,7 +344,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "eliminated",
       label: "已出局",
-      desc: `${contextPrefix}无论本场结果如何，均已无法进入小组前二。`,
+      desc: "无论本场结果如何，均已无法进入小组前二。",
       winOk,
       drawOk,
       lossOk,
@@ -361,7 +353,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "must_win",
       label: "必须取胜",
-      desc: `${contextPrefix}本场必须全取三分，平局或失利均无法出线。`,
+      desc: "本场必须全取三分，平局或失利均无法出线。",
       winOk,
       drawOk,
       lossOk,
@@ -370,7 +362,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "must_draw",
       label: "只能求平",
-      desc: `${contextPrefix}只有平局才能保留出线可能，输球即出局。`,
+      desc: "只有平局才能保留出线可能，输球即出局。",
       winOk,
       drawOk,
       lossOk,
@@ -379,7 +371,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "draw_ok",
       label: "可接受平局",
-      desc: `${contextPrefix}本场拿一分即可确保小组前二。`,
+      desc: "本场拿一分即可确保小组前二。",
       winOk,
       drawOk,
       lossOk,
@@ -388,7 +380,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "draw_ok",
       label: "可接受平局",
-      desc: `${contextPrefix}至少拿一分仍有望出线；若失利则出局。${canWin ? "取胜更稳。" : ""}`,
+      desc: `至少拿一分仍有望出线；若失利则出局。${canWin ? "取胜更稳。" : ""}`,
       winOk,
       drawOk,
       lossOk,
@@ -397,7 +389,7 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
     base = {
       status: "complex",
       label: "形势复杂",
-      desc: `${contextPrefix}出线取决于本场与其他场次组合：${outcomeSummary(winOk, drawOk, lossOk)}。`,
+      desc: `出线取决于本场与其他场次组合：${outcomeSummary(winOk, drawOk, lossOk)}。`,
       winOk,
       drawOk,
       lossOk,
@@ -421,6 +413,8 @@ export function analyzeTeamScenario(matches, targetMatch, team) {
   if (gdInfo.gdNeeded && gdInfo.gdDesc && base.status !== "complex") {
     base.desc = `${base.desc} ${gdInfo.gdDesc}`;
   }
+
+  base.knockoutOutlook = computeKnockoutOutlook(matches, targetMatch, team);
 
   return finalizeResult(base, gdInfo, context);
 }

@@ -1,12 +1,13 @@
-import { isRealTeam } from "./teams.js";
-import bundledData from "../data/worldcup.json" with { type: "json" };
+import { isRealTeam, teamLabel, flagHtml } from "./teams.js";
+
+const LOCAL_DATA_URL = new URL("../data/worldcup.json", import.meta.url).href;
 
 const GITHUB_RAW =
   "https://raw.githubusercontent.com/openfootball/worldcup.json/master/2026/worldcup.json";
 
 /** 多源检索：并行请求，取完赛场次最多的一份 */
 const DATA_SOURCES = [
-  { id: "local", url: "./data/worldcup.json", label: "同站缓存" },
+  { id: "local", url: LOCAL_DATA_URL, label: "同站缓存" },
   {
     id: "jsdmirror",
     url: "https://cdn.jsdmirror.com/gh/openfootball/worldcup.json@master/2026/worldcup.json",
@@ -29,6 +30,18 @@ const DATA_SOURCES = [
 
 const FETCH_TIMEOUT_MS = 6000;
 const AUTO_REFRESH_MS = 3 * 60 * 1000;
+
+let bundledCache = null;
+
+async function loadBundledRaw() {
+  if (bundledCache) return bundledCache;
+  const res = await fetch(LOCAL_DATA_URL, { cache: "force-cache" });
+  if (!res.ok) throw new Error(`内置数据加载失败 (${res.status})`);
+  const raw = await res.json();
+  if (!isValidWorldCupJson(raw)) throw new Error("内置数据格式无效");
+  bundledCache = raw;
+  return raw;
+}
 
 /** 解析 openfootball 时间格式，返回 Date（UTC）与北京时间的展示字符串 */
 export function parseMatchTime(dateStr, timeStr) {
@@ -144,14 +157,21 @@ async function fetchAllSources() {
   return results.filter(Boolean);
 }
 
-/** 内置数据，打开页面立即可用 */
-export function getBundledWorldCupData() {
-  return packRaw(bundledData, "bundled", "内置数据");
+/** 内置数据（fetch 加载，兼容旧版手机浏览器） */
+export async function getBundledWorldCupData() {
+  const raw = await loadBundledRaw();
+  return packRaw(raw, "bundled", "内置数据");
 }
 
 /** 并行检索全部数据源，自动选取最新的一份 */
 export async function fetchLatestWorldCupData() {
-  const bundled = getBundledWorldCupData();
+  let bundled;
+  try {
+    bundled = await getBundledWorldCupData();
+  } catch {
+    throw new Error("无法加载赛事数据");
+  }
+
   const results = await fetchAllSources();
   if (results.length === 0) return bundled;
 
@@ -257,12 +277,98 @@ export function getTeamMatches(matches, team) {
 }
 
 export function getPreviousMatch(matches, team, beforeMatch) {
+  const prev = getPreviousMatches(matches, team, beforeMatch, 1);
+  return prev[0] ?? null;
+}
+
+export function getPreviousMatches(matches, team, beforeMatch, count = 2) {
   const teamMatches = getTeamMatches(matches, team);
   const finished = teamMatches.filter((m) => m.finished);
-  if (beforeMatch?.utc) {
-    return finished.filter((m) => m.utc && m.utc < beforeMatch.utc).pop();
+  const filtered = beforeMatch?.utc
+    ? finished.filter((m) => m.utc && m.utc < beforeMatch.utc)
+    : finished.filter((m) => m.date < beforeMatch.date);
+  return filtered.slice(-count);
+}
+
+/** 按小组赛程顺序取当前场之前的 N 场（含已赛/未赛，确保第3轮能看到前两轮） */
+export function getPreviousGroupMatches(matches, team, beforeMatch, count = 2) {
+  if (!beforeMatch?.group) {
+    return getPreviousMatches(matches, team, beforeMatch, count);
   }
-  return finished.filter((m) => m.date < beforeMatch.date).pop();
+  const groupMatches = getTeamMatches(matches, team).filter(
+    (m) => m.group === beforeMatch.group && isRealTeam(m.home) && isRealTeam(m.away)
+  );
+  const idx = groupMatches.findIndex((m) => m.id === beforeMatch.id);
+  if (idx <= 0) return [];
+  return groupMatches.slice(Math.max(0, idx - count), idx);
+}
+
+export function getMatchOpponent(match, team) {
+  return match.home === team ? match.away : match.home;
+}
+
+export function getGroupRoundIndex(matches, team, match) {
+  if (!match?.group) return null;
+  const groupMatches = getTeamMatches(matches, team).filter(
+    (m) => m.group === match.group && isRealTeam(m.home) && isRealTeam(m.away)
+  );
+  const idx = groupMatches.findIndex((m) => m.id === match.id);
+  return idx >= 0 ? idx + 1 : null;
+}
+
+/** 文本：主队 3:2 客队（半场 1:0） */
+export function formatMatchupText(match) {
+  if (!match.finished) return "未赛";
+  const ht =
+    match.homeHtScore != null && match.awayHtScore != null
+      ? `（半场 ${match.homeHtScore}:${match.awayHtScore}）`
+      : "";
+  return `${teamLabel(match.home)} ${match.homeScore}:${match.awayScore} ${teamLabel(match.away)}${ht}`;
+}
+
+/** HTML：国旗 + 队名 + 比分，主客队一目了然 */
+export function formatMatchupHtml(match, highlightTeam = null) {
+  const homeCls = highlightTeam === match.home ? " matchup-team--self" : "";
+  const awayCls = highlightTeam === match.away ? " matchup-team--self" : "";
+  const scoreText = match.finished ? `${match.homeScore} : ${match.awayScore}` : "未赛";
+  const ht =
+    match.finished && match.homeHtScore != null && match.awayHtScore != null
+      ? `<div class="matchup-ht">半场 ${match.homeHtScore} : ${match.awayHtScore}</div>`
+      : "";
+  return `
+    <div class="matchup-result${match.finished ? "" : " matchup-pending"}">
+      <div class="matchup-main">
+        <span class="matchup-team${homeCls}">${flagHtml(match.home, 20)}<span>${teamLabel(match.home)}</span></span>
+        <span class="matchup-score">${scoreText}</span>
+        <span class="matchup-team${awayCls}"><span>${teamLabel(match.away)}</span>${flagHtml(match.away, 20)}</span>
+      </div>
+      ${ht}
+    </div>`;
+}
+
+export function formatPrevResultSummary(matches, prev, team) {
+  const round = getGroupRoundIndex(matches, team, prev);
+  const label = round ? `第${round}轮` : "上轮";
+  if (!prev.finished) {
+    return `${label}：${teamLabel(prev.home)} vs ${teamLabel(prev.away)}（未赛）`;
+  }
+  return `${label}：${formatMatchupText(prev)}`;
+}
+
+export function formatNextMatchSummary(matches, team, afterMatch) {
+  const next = getNextMatch(matches, team, afterMatch);
+  if (!next) {
+    const round = getGroupRoundIndex(matches, team, afterMatch);
+    if (round === 3) return "小组末轮，淘汰赛后对手待定";
+    return "暂无后续比赛";
+  }
+  if (!isRealTeam(next.home) || !isRealTeam(next.away)) {
+    return `下轮：${next.round}（${next.beijingFull}）`;
+  }
+  const opponent = getMatchOpponent(next, team);
+  const round = getGroupRoundIndex(matches, team, next);
+  const roundLabel = round ? `第${round}轮` : "下轮";
+  return `${roundLabel}预计对手：${teamLabel(opponent)}（${next.beijingFull}）`;
 }
 
 export function getNextMatch(matches, team, afterMatch) {
