@@ -171,24 +171,18 @@ html, body {
   margin-top: 0;
 }
 
-.history-picker {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  gap: 8px;
-  align-items: end;
-  margin-bottom: 16px;
+.history-team-block--pending .history-team-header {
+  opacity: 0.85;
 }
 
-.history-picker .select-row {
-  margin: 0;
+.history-team-info {
+  min-width: 0;
 }
 
-.history-vs-badge {
-  padding-bottom: 10px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  text-align: center;
+.history-team-info .fifa-rank {
+  display: block;
+  margin-top: 2px;
+  margin-bottom: 4px;
 }
 
 .history-team-block {
@@ -247,16 +241,6 @@ html, body {
 .history-match-time {
   font-size: 12px;
   color: var(--text-secondary);
-}
-
-.history-team-info {
-  min-width: 0;
-}
-
-.history-team-info .fifa-rank {
-  display: block;
-  margin-top: 2px;
-  margin-bottom: 4px;
 }
 
 .history-match-ranks {
