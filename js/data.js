@@ -91,6 +91,7 @@ export function normalizeMatch(raw, index) {
 
   return {
     id: index,
+    num: raw.num ?? null,
     round: raw.round,
     date: raw.date,
     time: raw.time,
@@ -216,6 +217,18 @@ export function startAutoDataRefresh(onUpdate, intervalMs = AUTO_REFRESH_MS) {
     clearInterval(timer);
     document.removeEventListener("visibilitychange", onVisible);
   };
+}
+
+export function isGroupMatch(match) {
+  return match?.stage === "group";
+}
+
+export function isKnockoutMatch(match) {
+  return match?.stage === "knockout";
+}
+
+export function getKnockoutMatches(matches) {
+  return sortMatchesByTime(matches.filter(isKnockoutMatch));
 }
 
 export function getGroupTeams(matches, groupLetter) {

@@ -161,6 +161,150 @@ html, body {
   margin-top: 0;
 }
 
+.section-label--round {
+  font-size: 14px;
+  color: var(--primary);
+  margin-top: 16px;
+}
+
+.bracket-section:first-child .section-label--round {
+  margin-top: 0;
+}
+
+.history-picker {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 16px;
+}
+
+.history-picker .select-row {
+  margin: 0;
+}
+
+.history-vs-badge {
+  padding-bottom: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.history-team-block {
+  margin-bottom: 20px;
+}
+
+.history-team-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.history-team-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.history-team-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.history-matches-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-match-item {
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.history-match-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+}
+
+.history-match-round {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.history-match-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.history-team-info {
+  min-width: 0;
+}
+
+.history-team-info .fifa-rank {
+  display: block;
+  margin-top: 2px;
+  margin-bottom: 4px;
+}
+
+.history-match-ranks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.history-match-ranks-vs {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.history-match-body .matchup-result {
+  margin: 0;
+}
+
+.history-match-ground {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.history-slot,
+.history-vs,
+.history-pending {
+  font-size: 13px;
+}
+
+.history-pending {
+  color: var(--text-secondary);
+}
+
+.history-empty {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 8px 2px;
+}
+
+.match-ground {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding-left: 2px;
+}
+
 .match-card {
   background: var(--surface);
   border: 1px solid var(--border);
