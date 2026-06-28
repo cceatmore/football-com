@@ -12,16 +12,14 @@ import {
   isKnockoutMatch,
   getGroupRoundIndex,
 } from "./data.js";
-import { computeAllStandings, getTeamPoints, getTeamGroupRank } from "./standings.js";
+import { computeAllStandings, getTeamGroupRank } from "./standings.js";
 import {
   formatKnockoutRoundLabel,
   resolveMatchTeams,
-  formatSlotDisplayLabel,
 } from "./knockout.js";
 import {
   flagHtml,
   teamLabel,
-  teamInlineHtml,
   getFifaRank,
   formatFifaRank,
   isRealTeam,
@@ -30,8 +28,6 @@ import {
 const state = {
   tab: "schedule",
   dayFilter: "all",
-  historyDayFilter: "all",
-  showFifaRank: localStorage.getItem("showFifaRank") !== "false",
   standingsExpandedTeam: null,
   matches: [],
   dataSource: "bundled",
@@ -52,8 +48,7 @@ const els = {
 
 const TAB_TITLES = {
   schedule: { title: "淘汰赛", sub: "2026 FIFA 世界杯 · 北京时间" },
-  standings: { title: "积分榜", sub: "小组最终排名 · 积分" },
-  history: { title: "对局历史", sub: "即将进行的比赛 · 点击查看双方历程" },
+  standings: { title: "积分榜", sub: "小组最终排名" },
 };
 
 const DAY_FILTERS = [
@@ -133,7 +128,7 @@ function bindEvents() {
   window.addEventListener("resize", () => {
     clearTimeout(marqueeResizeTimer);
     marqueeResizeTimer = setTimeout(() => {
-      if (state.tab === "schedule" || state.tab === "history") {
+      if (state.tab === "schedule") {
         setupTeamNameMarquee(els.main);
       }
     }, 150);
@@ -156,8 +151,7 @@ function renderLoading() {
 function render() {
   updateTabs();
   if (state.tab === "schedule") renderSchedule();
-  else if (state.tab === "standings") renderStandings();
-  else renderHistory();
+  else renderStandings();
 }
 
 function renderFilterBar(current) {
@@ -192,7 +186,7 @@ function renderSchedule() {
     renderScheduleToolbar(state.dayFilter),
     matches.length
       ? groupMatchesByDate(matches)
-          .map(({ label, items }) => sectionMatches(label, items, "schedule"))
+          .map(({ label, items }) => sectionMatches(label, items))
           .join("")
       : `<div class="empty-state"><div class="icon">📭</div><p>该时间段暂无淘汰赛</p></div>`,
     dataSourceNote(),
@@ -200,68 +194,12 @@ function renderSchedule() {
 
   els.main.innerHTML = html;
   bindFilterBar(els.main, "dayFilter");
-  bindFifaSwitch(els.main, renderSchedule);
-  bindMatchCards(els.main);
-  scheduleTeamNameMarquee(els.main);
-}
-
-function renderHistoryToolbar(currentFilter) {
-  return `
-    <div class="schedule-toolbar">
-      ${renderFilterBar(currentFilter)}
-      <div class="schedule-switches">
-        <label class="switch-wrap" title="显示 FIFA 世界排名">
-          <span class="switch-label">排名</span>
-          <input type="checkbox" id="show-fifa-switch" ${state.showFifaRank ? "checked" : ""}>
-          <span class="switch-track" aria-hidden="true"></span>
-        </label>
-      </div>
-    </div>
-  `;
-}
-
-function renderHistory() {
-  const matches = upcomingKnockoutMatches(state.historyDayFilter);
-  els.main.innerHTML = [
-    renderHistoryToolbar(state.historyDayFilter),
-    matches.length
-      ? groupMatchesByDate(matches)
-          .map(({ label, items }) => sectionMatches(label, items, "history"))
-          .join("")
-      : `<div class="empty-state"><div class="icon">📋</div><p>该时间段暂无比赛</p></div>`,
-    dataSourceNote(),
-  ].join("");
-
-  bindFilterBar(els.main, "historyDayFilter");
-  bindFifaSwitch(els.main, renderHistory);
   bindMatchCards(els.main);
   scheduleTeamNameMarquee(els.main);
 }
 
 function renderScheduleToolbar(currentFilter) {
-  return `
-    <div class="schedule-toolbar">
-      ${renderFilterBar(currentFilter)}
-      <div class="schedule-switches">
-        <label class="switch-wrap" title="显示 FIFA 世界排名">
-          <span class="switch-label">排名</span>
-          <input type="checkbox" id="show-fifa-switch" ${state.showFifaRank ? "checked" : ""}>
-          <span class="switch-track" aria-hidden="true"></span>
-        </label>
-      </div>
-    </div>
-  `;
-}
-
-function bindFifaSwitch(container, rerender) {
-  const fifaInput = container.querySelector("#show-fifa-switch");
-  if (fifaInput) {
-    fifaInput.addEventListener("change", () => {
-      state.showFifaRank = fifaInput.checked;
-      localStorage.setItem("showFifaRank", String(state.showFifaRank));
-      rerender();
-    });
-  }
+  return `<div class="schedule-toolbar">${renderFilterBar(currentFilter)}</div>`;
 }
 
 function groupMatchesByDate(matches) {
@@ -276,41 +214,24 @@ function groupMatchesByDate(matches) {
   return [...map.values()];
 }
 
-function sectionMatches(label, matches, mode) {
+function sectionMatches(label, matches) {
   return `
     <div class="section-label">${label}</div>
-    ${matches.map((m) => matchCardHtml(m, mode)).join("")}
+    ${matches.map((m) => matchCardHtml(m)).join("")}
   `;
 }
 
-function formatPtsInline(points, rank) {
-  if (rank) return `(${points}·第${rank}名)`;
-  return `(${points})`;
-}
-
-function matchCardHtml(m, mode = "schedule", opts = {}) {
-  const showFifaRank = opts.showFifaRank ?? state.showFifaRank;
+function matchCardHtml(m, opts = {}) {
   const staticCard = opts.static === true;
   const isKnockout = isKnockoutMatch(m);
   const resolved = isKnockout ? resolveMatchTeams(m, state.matches) : null;
 
   let homeName = m.home;
   let awayName = m.away;
-  let homePts = null;
-  let awayPts = null;
-  let homeRank = null;
-  let awayRank = null;
 
   if (isKnockout && resolved) {
     homeName = resolved.home;
     awayName = resolved.away;
-  } else if (m.group) {
-    homePts = isRealTeam(m.home) ? getTeamPoints(state.matches, m.home, m.group) : null;
-    awayPts = isRealTeam(m.away) ? getTeamPoints(state.matches, m.away, m.group) : null;
-    if (opts.showRank) {
-      homeRank = getTeamGroupRank(state.matches, m.home, m.group);
-      awayRank = getTeamGroupRank(state.matches, m.away, m.group);
-    }
   }
 
   const roundLabel = isKnockout ? formatKnockoutRoundLabel(m.round) : m.group ? `${m.group} 组` : m.round;
@@ -318,27 +239,25 @@ function matchCardHtml(m, mode = "schedule", opts = {}) {
   const awayDisplay = isKnockout && resolved ? resolved.awayLabel : null;
   const homeScore = m.finished ? m.homeScore : null;
   const awayScore = m.finished ? m.awayScore : null;
+  const showFifa = opts.showFifaRank !== false;
+  const hideRound = opts.hideRound === true;
 
   return `
-    <article class="match-card ${m.finished ? "finished" : ""}${staticCard ? " match-card--static" : ""}"${staticCard ? "" : ` data-match-id="${m.id}" data-mode="${mode}"`}>
-      <div class="match-card-line">
-        <span class="group-badge">${roundLabel}</span>
-        ${teamInline(homeName, homePts, false, homeScore, "home", homeRank, showFifaRank, homeDisplay)}
+    <article class="match-card ${m.finished ? "finished" : ""}${staticCard ? " match-card--static" : ""}"${staticCard ? "" : ` data-match-id="${m.id}"`}>
+      <div class="match-card-line${hideRound ? " match-card-line--no-group" : ""}">
+        ${hideRound ? "" : `<span class="group-badge">${roundLabel}</span>`}
+        ${teamInline(homeName, homeScore, "home", showFifa, homeDisplay)}
         <span class="match-vs">VS</span>
-        ${teamInline(awayName, awayPts, false, awayScore, "away", awayRank, showFifaRank, awayDisplay)}
+        ${teamInline(awayName, awayScore, "away", showFifa, awayDisplay)}
         <span class="match-time">${m.beijingTime || "待定"}</span>
       </div>
-      ${m.ground ? `<div class="match-ground">${m.ground}</div>` : ""}
+      ${!opts.hideGround && m.ground ? `<div class="match-ground">${m.ground}</div>` : ""}
     </article>
   `;
 }
 
-function teamInline(name, points, showPoints, score, side, rank = null, showFifa = false, displayName = null) {
+function teamInline(name, score, side, showFifa = true, displayName = null) {
   const label = displayName || teamLabel(name);
-  const pts =
-    showPoints && points !== null
-      ? `<span class="team-pts">${formatPtsInline(points, rank)}</span>`
-      : "";
   const scoreHtml =
     score !== null ? `<span class="team-score-inline">${score}</span>` : "";
   const fifaHtml =
@@ -348,7 +267,7 @@ function teamInline(name, points, showPoints, score, side, rank = null, showFifa
   const nameBlock = `
     <span class="team-name-stack">
       <span class="team-name-scroll">
-        <span class="team-name-track">${label}${pts}${scoreHtml}</span>
+        <span class="team-name-track">${label}${scoreHtml}</span>
       </span>
       ${fifaHtml}
     </span>`;
@@ -390,11 +309,9 @@ function bindMatchCards(container) {
   container.querySelectorAll(".match-card").forEach((card) => {
     card.addEventListener("click", () => {
       const id = Number(card.dataset.matchId);
-      const mode = card.dataset.mode || "schedule";
       const match = state.matches.find((m) => m.id === id);
       if (!match) return;
-      if (mode === "history") openHistoryDetail(match);
-      else openMatchDetail(match);
+      openMatchDetail(match);
     });
   });
 }
@@ -404,42 +321,35 @@ function fifaRankHtml(name) {
   return text ? `<span class="fifa-rank">${text}</span>` : "";
 }
 
+function historyMatchBodyText(match, team) {
+  const opponent = match.home === team ? match.away : match.home;
+  const oppFifa =
+    isRealTeam(opponent) && getFifaRank(opponent) ? ` (FIFA ${getFifaRank(opponent)})` : "";
+
+  if (match.finished) {
+    return `${formatMatchupText(match)}${oppFifa}`;
+  }
+  const oppLabel = isRealTeam(opponent) ? teamLabel(opponent) : opponent;
+  return `vs ${oppLabel}${oppFifa}（未赛）`;
+}
+
 function historyMatchItemHtml(match, team) {
-  const roundLabel = match.group
-    ? `小组赛 · 第 ${getGroupRoundIndex(state.matches, team, match) ?? "-"} 轮`
-    : formatKnockoutRoundLabel(match.round);
   const result = teamMatchResultLabel(match, team);
   const resultClass =
     result === "胜" ? "win" : result === "负" ? "loss" : result === "平" ? "draw" : "pending";
-  const opponent = match.home === team ? match.away : match.home;
-  const opponentHtml = isRealTeam(opponent)
-    ? teamInlineHtml(opponent, 18)
-    : `<span class="history-slot">${formatSlotDisplayLabel(opponent)}</span>`;
-  const body = match.finished
-    ? formatMatchupHtml(match, team)
-    : `<span class="history-vs">vs ${opponentHtml}</span><span class="history-pending">（未赛）</span>`;
-  const homeRank = isRealTeam(match.home) ? fifaRankHtml(match.home) : "";
-  const awayRank = isRealTeam(match.away) ? fifaRankHtml(match.away) : "";
-  const ranksRow =
-    homeRank || awayRank
-      ? `<div class="history-match-ranks">${homeRank}<span class="history-match-ranks-vs">vs</span>${awayRank}</div>`
-      : "";
+  const body = historyMatchBodyText(match, team);
 
   return `
-    <div class="history-match-item">
-      <div class="history-match-meta">
-        <span class="history-match-round">${roundLabel}</span>
-        <span class="history-match-time">${match.beijingFull || match.beijingDate || "待定"}</span>
-        <span class="standings-match-result ${resultClass}">${result}</span>
-      </div>
-      ${ranksRow}
-      <div class="history-match-body">${body}</div>
-      ${match.ground ? `<div class="history-match-ground">${match.ground}</div>` : ""}
+    <div class="history-match-item history-match-item--compact result-${resultClass}">
+      <span class="standings-match-result ${resultClass}">${result}</span>
+      <span class="history-match-body">${body}</span>
     </div>`;
 }
 
-function historyTeamBlockHtml(team) {
-  const matches = getTeamMatches(state.matches, team);
+function historyTeamBlockHtml(team, excludeMatchId = null) {
+  const matches = getTeamMatches(state.matches, team).filter(
+    (m) => excludeMatchId == null || m.id !== excludeMatchId
+  );
   const meta = teamGroupMeta(team);
 
   return `
@@ -473,18 +383,15 @@ function historyUnresolvedBlockHtml(label) {
     </div>`;
 }
 
-function renderMatchHistoryDetail(match, { subTitle = "比赛详情", headingPrefix = "" } = {}) {
+function openMatchDetail(match) {
   const resolved = resolveMatchTeams(match, state.matches);
   const roundLabel = formatKnockoutRoundLabel(match.round);
-  const heading = headingPrefix ? `${headingPrefix}${roundLabel}` : roundLabel;
 
-  els.subTitle.textContent = subTitle;
+  els.subTitle.textContent = "比赛详情";
   els.subContent.innerHTML = `
     <div class="detail-card">
-      <h3>⚽ ${heading}${match.num ? ` · 第 ${match.num} 场` : ""}</h3>
-      ${matchCardHtml(match, "detail", { static: true, showFifaRank: state.showFifaRank })}
-      <div class="detail-row"><span class="label">北京时间</span><span class="value">${match.beijingFull || "待定"}</span></div>
-      ${match.ground ? `<div class="detail-row"><span class="label">球场</span><span class="value">${match.ground}</span></div>` : ""}
+      <h3>⚽ ${roundLabel}${match.num ? ` · 第 ${match.num} 场` : ""}</h3>
+      ${matchCardHtml(match, { static: true, hideGround: true, hideRound: true })}
       ${
         match.finished
           ? `<div class="detail-row"><span class="label">比分</span><span class="value">${formatMatchupHtml(match)}</span></div>`
@@ -499,26 +406,18 @@ function renderMatchHistoryDetail(match, { subTitle = "比赛详情", headingPre
 
     ${
       isRealTeam(resolved.home)
-        ? historyTeamBlockHtml(resolved.home)
+        ? historyTeamBlockHtml(resolved.home, match.id)
         : historyUnresolvedBlockHtml(resolved.homeLabel)
     }
     ${
       isRealTeam(resolved.away)
-        ? historyTeamBlockHtml(resolved.away)
+        ? historyTeamBlockHtml(resolved.away, match.id)
         : historyUnresolvedBlockHtml(resolved.awayLabel)
     }
   `;
 
   showSubPage();
   scheduleTeamNameMarquee(els.subContent);
-}
-
-function openHistoryDetail(match) {
-  renderMatchHistoryDetail(match, { subTitle: "对局历史", headingPrefix: "即将对阵 · " });
-}
-
-function openMatchDetail(match) {
-  renderMatchHistoryDetail(match);
 }
 
 function renderStandings() {
@@ -600,7 +499,6 @@ function standingsGroupHtml({ group, rows }) {
             <th>进</th>
             <th>失</th>
             <th>净</th>
-            <th>分</th>
           </tr>
         </thead>
         <tbody>
@@ -624,10 +522,9 @@ function standingsGroupHtml({ group, rows }) {
               <td>${r.gf}</td>
               <td>${r.ga}</td>
               <td>${r.gd > 0 ? "+" + r.gd : r.gd}</td>
-              <td class="pts">${r.pts}</td>
             </tr>
             <tr class="standings-detail-row${expanded ? "" : " hidden"}" data-team="${r.team}">
-              <td colspan="10">
+              <td colspan="9">
                 <div class="standings-matches-panel">
                   <div class="standings-matches-title">本届世界杯战绩</div>
                   ${standingsTeamMatchesHtml(r.team)}
@@ -647,10 +544,8 @@ function teamGroupMeta(team) {
     (m) => m.group && m.finished && (m.home === team || m.away === team)
   );
   if (!groupMatch?.group) return null;
-  const pts = getTeamPoints(state.matches, team, groupMatch.group);
   const rank = getTeamGroupRank(state.matches, team, groupMatch.group);
-  const rankText = rank ? `第 ${rank} 名 · ` : "";
-  return `${groupMatch.group} 组 · ${rankText}${pts} 分`;
+  return rank ? `${groupMatch.group} 组 · 第 ${rank} 名` : `${groupMatch.group} 组`;
 }
 
 function showSubPage() {
