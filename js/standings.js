@@ -1,15 +1,15 @@
-import { getGroupTeams } from "./data.js";
-import { isRealTeam } from "./teams.js";
+import { getGroupTeams, getTeamMatches } from "./data.js";
+import { isRealTeam, formatRank } from "./teams.js";
 
 const SORT_KEYS = ["pts", "gd", "gf", "team"];
 
 function emptyRecord(team) {
-  return { team, mp: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, gd: 0, pts: 0 };
+  return { team, mp: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, gd: 0, pts: 0, rank: null };
 }
 
 function compareRows(a, b) {
   for (const key of SORT_KEYS) {
-    if (key === "team") return a.team.localeCompare(b.team);
+    if (key === "team") return a.team.localeCompare(b.team, "zh-CN");
     if (a[key] !== b[key]) return b[key] - a[key];
   }
   return 0;
@@ -60,53 +60,91 @@ export function computeStandings(matches, groupLetter) {
   return teams.map((t) => table[t]).sort(compareRows);
 }
 
-export function computeAllStandings(matches) {
-  const groups = [
-    ...new Set(matches.filter((m) => m.group).map((m) => m.group)),
-  ].sort();
+/** 从体彩场次中的联赛排名构建积分榜（官方排名优先） */
+export function computeLeagueRankStandings(currentMatches) {
+  const groups = new Map();
 
-  return groups.map((g) => ({
-    group: g,
-    rows: computeStandings(matches, g),
-  }));
+  for (const m of currentMatches) {
+    if (!m.group) continue;
+    if (!groups.has(m.group)) {
+      groups.set(m.group, {
+        group: m.group,
+        groupLabel: m.groupLabel || m.league || m.group,
+        rankLeague: m.rankLeague || m.group,
+        teams: new Map(),
+      });
+    }
+    const g = groups.get(m.group);
+    if (isRealTeam(m.home) && m.homeRank != null && !g.teams.has(m.home)) {
+      g.teams.set(m.home, { team: m.home, rank: m.homeRank });
+    }
+    if (isRealTeam(m.away) && m.awayRank != null && !g.teams.has(m.away)) {
+      g.teams.set(m.away, { team: m.away, rank: m.awayRank });
+    }
+  }
+
+  return [...groups.values()]
+    .map((g) => ({
+      group: g.group,
+      groupLabel: g.groupLabel,
+      rankLeague: g.rankLeague,
+      rows: [...g.teams.values()]
+        .sort((a, b) => a.rank - b.rank)
+        .map((r) => ({
+          team: r.team,
+          rank: r.rank,
+          mp: null,
+          w: null,
+          d: null,
+          l: null,
+          gf: null,
+          ga: null,
+          gd: null,
+          pts: null,
+          rankLabel: formatRank(r.rank, g.rankLeague),
+        })),
+    }))
+    .sort((a, b) => a.group.localeCompare(b.group, "zh-CN"));
 }
 
-export function getTeamPoints(matches, team, groupLetter) {
-  const rows = computeStandings(matches, groupLetter);
-  return rows.find((r) => r.team === team)?.pts ?? 0;
+export function computeAllStandings(allMatches, currentMatches = []) {
+  const fromResults = [
+    ...new Set(allMatches.filter((m) => m.group && m.finished).map((m) => m.group)),
+  ];
+
+  if (fromResults.length > 0) {
+    return fromResults.sort().map((g) => ({
+      group: g,
+      groupLabel: allMatches.find((m) => m.group === g)?.groupLabel || g,
+      mode: "computed",
+      rows: computeStandings(allMatches, g),
+    }));
+  }
+
+  return computeLeagueRankStandings(currentMatches).map((g) => ({ ...g, mode: "official" }));
 }
 
 export function getTeamGroupRank(matches, team, groupLetter) {
   if (!groupLetter || !isRealTeam(team)) return null;
+  const row = computeAllStandings(matches).flatMap((g) => g.rows).find((r) => r.team === team);
+  if (row?.rank != null) return row.rank;
   return rankInGroup(computeStandings(matches, groupLetter), team);
-}
-
-export function buildTableFromResults(matches, groupLetter, assumedResults) {
-  const teams = getGroupTeams(matches, groupLetter);
-  const table = Object.fromEntries(teams.map((t) => [t, emptyRecord(t)]));
-
-  matches
-    .filter(
-      (m) =>
-        m.group === groupLetter &&
-        m.finished &&
-        isRealTeam(m.home) &&
-        isRealTeam(m.away)
-    )
-    .forEach((m) => applyResult(table, m.home, m.away, m.homeScore, m.awayScore));
-
-  assumedResults.forEach(({ home, away, homeScore, awayScore }) => {
-    if (table[home] && table[away]) {
-      applyResult(table, home, away, homeScore, awayScore);
-    }
-  });
-
-  return teams.map((t) => table[t]);
 }
 
 export function rankInGroup(tableRows, team) {
   const sorted = [...tableRows].sort(compareRows);
   return sorted.findIndex((r) => r.team === team) + 1;
+}
+
+export function getTeamPoints(matches, team, groupLetter) {
+  const rows = computeStandings(matches, groupLetter);
+  return rows.find((r) => r.team === team)?.pts ?? null;
+}
+
+export function getTeamRecentForm(allMatches, team, count = 5) {
+  return getTeamMatches(allMatches, team)
+    .filter((m) => m.finished)
+    .slice(-count);
 }
 
 export { compareRows };
