@@ -32,12 +32,14 @@ async function fetchUniform(path) {
 }
 
 export async function fetchMatchIntel(matchId) {
-  const [feature, head, tables] = await Promise.all([
+  const [feature, head, tables, injuries, players] = await Promise.all([
     fetchUniform(`getMatchFeatureV1.qry?sportteryMatchId=${matchId}&termLimits=10`),
     fetchUniform(`getMatchHeadV1.qry?sportteryMatchId=${matchId}&termLimits=10`),
     fetchUniform(`getMatchTablesV1.qry?sportteryMatchId=${matchId}`),
+    fetchUniform(`getInjurySuspensionV1.qry?sportteryMatchId=${matchId}`),
+    fetchUniform(`getMatchPlayerV1.qry?sportteryMatchId=${matchId}&termLimits=5`),
   ]);
-  return { feature, head, tables };
+  return { feature, head, tables, injuries, players };
 }
 
 function parseNum(v, fallback = 0) {
@@ -305,7 +307,116 @@ function buildFormAnalysis(feature, form) {
   };
 }
 
-function buildSummary(match, blended, sources, poisson) {
+function playerStatus(raw) {
+  const injured = Number(raw.injuryFlag) === 1;
+  const suspended = Number(raw.suspensionFlag) === 1;
+  if (injured && suspended) return { label: "伤病+停赛", type: "out" };
+  if (injured) return { label: "伤病", type: "out" };
+  if (suspended) return { label: "停赛", type: "out" };
+  return { label: "可出战", type: "ok" };
+}
+
+function formatPlayerLine(p) {
+  const parts = [`${p.number || "—"}号 ${p.name}`, p.position];
+  if (p.goals != null) parts.push(`${p.goals}球`);
+  if (p.starts != null) parts.push(`${p.starts}首发`);
+  parts.push(p.status.label);
+  return parts.filter(Boolean).join(" · ");
+}
+
+function buildTeamInjuryReport(teamLabel, sideData, playerSide) {
+  const unavailableList = sideData?.injuriesAndSuspensionsList || [];
+  const keyPlayers = playerSide?.playerList || [];
+
+  const keyReports = keyPlayers.map((p) => ({
+    id: p.personId,
+    name: p.personName,
+    number: p.uniformNo,
+    position: p.playerPositionDesc,
+    goals: parseNum(p.goalCnt, null),
+    starts: parseNum(p.startedMatchCnt, null),
+    status: playerStatus(p),
+    isKey: true,
+  }));
+
+  const keyIds = new Set(keyPlayers.map((p) => p.personId));
+  const extraUnavailable = unavailableList
+    .filter((p) => !keyIds.has(p.personId))
+    .map((p) => ({
+      id: p.personId,
+      name: p.personName,
+      number: p.uniformNo,
+      position: p.playerPositionDesc,
+      status: playerStatus(p),
+      isKey: false,
+    }));
+
+  const outKeys = keyReports.filter((p) => p.status.type === "out");
+
+  return {
+    team: teamLabel,
+    teamShort: sideData?.teamShortName || teamLabel,
+    keyPlayers: keyReports,
+    extraUnavailable,
+    outKeys,
+    unavailableCount: outKeys.length + extraUnavailable.length,
+  };
+}
+
+function buildInjuryAnalysis(match, intel) {
+  const { injuries, players } = intel;
+  if (!injuries && !players) return null;
+
+  const home = buildTeamInjuryReport(match.home, injuries?.home, players?.home);
+  const away = buildTeamInjuryReport(match.away, injuries?.away, players?.away);
+  const bullets = [];
+  const impact = [];
+
+  for (const side of [home, away]) {
+    if (side.outKeys.length) {
+      bullets.push(
+        `${side.team} 主力缺阵：${side.outKeys.map((p) => formatPlayerLine(p)).join("；")}`
+      );
+      const topScorerOut = side.outKeys.some(
+        (p) => p.goals != null && p.goals >= Math.max(...side.keyPlayers.map((k) => k.goals || 0), 0)
+      );
+      if (topScorerOut) {
+        impact.push(`${side.team} 主力射手缺阵，进攻端实力可能下滑`);
+      }
+    }
+    if (side.extraUnavailable.length) {
+      bullets.push(
+        `${side.team} 其他伤停：${side.extraUnavailable.map((p) => formatPlayerLine(p)).join("；")}`
+      );
+    }
+    if (!side.outKeys.length && !side.extraUnavailable.length) {
+      bullets.push(`${side.team} 暂无官方伤停记录`);
+    }
+  }
+
+  if (home.unavailableCount > away.unavailableCount) {
+    impact.push("主队缺阵人数更多，阵容厚度可能受影响");
+  } else if (away.unavailableCount > home.unavailableCount) {
+    impact.push("客队缺阵人数更多，阵容厚度可能受影响");
+  }
+
+  if (!bullets.length) {
+    bullets.push("暂无伤停情报");
+  }
+
+  return {
+    source: "injury",
+    name: "伤停情报",
+    tagline: "体彩官方 · 主力球员与缺阵",
+    url: "https://www.sporttery.cn/",
+    home,
+    away,
+    bullets,
+    impact,
+  };
+}
+
+function buildSummary(match, blended, sources, poisson, injury) {
   const pick = pickOutcome(blended);
   const confidence = pick.prob >= 0.5 ? "较高" : pick.prob >= 0.4 ? "中等" : "偏低";
   const scorePick = poisson?.topScores?.[0]?.score || "—";
@@ -319,6 +430,10 @@ function buildSummary(match, blended, sources, poisson) {
 
   if (dissent.length) {
     bullets.push(`分歧提示：${dissent.map((s) => `${s.name}看${s.pick.short}`).join("、")}，需谨慎`);
+  }
+
+  if (injury?.impact?.length) {
+    bullets.push(...injury.impact.slice(0, 2));
   }
 
   if (match.hhad?.line) {
@@ -350,6 +465,7 @@ export function buildMatchAnalysis(match, intel) {
   const market = buildOddsAnalysis(match, oddsProbs);
   const poissonSrc = buildPoissonAnalysis(match, intel.feature, poisson);
   const formSrc = buildFormAnalysis(intel.feature, form);
+  const injury = buildInjuryAnalysis(match, intel);
 
   const blended = blendProbs([
     { probs: oddsProbs, weight: 0.4 },
@@ -357,12 +473,13 @@ export function buildMatchAnalysis(match, intel) {
     { probs: form, weight: 0.25 },
   ]);
 
-  const summary = buildSummary(match, blended, [market, poissonSrc, formSrc], poisson);
+  const summary = buildSummary(match, blended, [market, poissonSrc, formSrc], poisson, injury);
 
   return {
     matchId: match.id,
     updatedAt: new Date().toISOString(),
     summary,
+    injury,
     sources: [sporttery, market, poissonSrc, formSrc],
     probs: blended,
   };
@@ -375,6 +492,96 @@ export async function fetchAndAnalyzeMatch(match) {
   const analysis = buildMatchAnalysis(match, intel);
   cache.set(match.id, analysis);
   return analysis;
+}
+
+export function injuryReportHtml(injury, match) {
+  if (!injury) {
+    return `<div class="prediction-injury-card"><p class="injury-empty">暂无伤停数据</p></div>`;
+  }
+
+  const renderTeam = (side, label) => {
+    const outKeys = side.outKeys || [];
+    const healthyKeys = (side.keyPlayers || []).filter((p) => p.status.type === "ok");
+    return `
+      <div class="injury-team-block">
+        <div class="injury-team-header">
+          <span class="injury-team-name">${label}</span>
+          <span class="injury-team-count">${side.unavailableCount ? `${side.unavailableCount} 人缺阵` : "全员可战"}</span>
+        </div>
+        ${
+          side.keyPlayers?.length
+            ? `<div class="injury-section">
+                <div class="injury-section-title">主力球员 (${side.keyPlayers.length})</div>
+                <ul class="injury-player-list">
+                  ${side.keyPlayers
+                    .map(
+                      (p) => `
+                    <li class="injury-player injury-player--${p.status.type}">
+                      <span class="injury-player-no">${p.number || "—"}</span>
+                      <span class="injury-player-name">${p.name}</span>
+                      <span class="injury-player-meta">${p.position}${p.goals != null ? ` · ${p.goals}球` : ""}${p.starts != null ? ` · ${p.starts}首发` : ""}</span>
+                      <span class="injury-player-status">${p.status.label}</span>
+                    </li>`
+                    )
+                    .join("")}
+                </ul>
+              </div>`
+            : ""
+        }
+        ${
+          side.extraUnavailable?.length
+            ? `<div class="injury-section">
+                <div class="injury-section-title">其他伤停</div>
+                <ul class="injury-player-list injury-player-list--compact">
+                  ${side.extraUnavailable
+                    .map(
+                      (p) => `
+                    <li class="injury-player injury-player--out">
+                      <span class="injury-player-no">${p.number || "—"}</span>
+                      <span class="injury-player-name">${p.name}</span>
+                      <span class="injury-player-meta">${p.position}</span>
+                      <span class="injury-player-status">${p.status.label}</span>
+                    </li>`
+                    )
+                    .join("")}
+                </ul>
+              </div>`
+            : ""
+        }
+        ${
+          !outKeys.length && !side.extraUnavailable?.length && !healthyKeys.length
+            ? `<p class="injury-empty">暂无球员数据</p>`
+            : ""
+        }
+      </div>`;
+  };
+
+  return `
+    <div class="prediction-injury-card">
+      <div class="prediction-source-header">
+        <div>
+          <div class="prediction-source-name">${injury.name}</div>
+          <div class="prediction-source-tag">${injury.tagline}</div>
+        </div>
+      </div>
+      ${renderTeam(injury.home, `${match.home}（主）`)}
+      ${renderTeam(injury.away, `${match.away}（客）`)}
+      ${
+        injury.impact?.length
+          ? `<ul class="prediction-bullets injury-impact-list">
+              ${injury.impact.map((b) => `<li>${b}</li>`).join("")}
+            </ul>`
+          : ""
+      }
+      <a class="prediction-source-link" href="${injury.url}" target="_blank" rel="noopener noreferrer">数据来源：中国体彩 →</a>
+    </div>`;
+}
+
+export function injuryBadgeText(injury) {
+  if (!injury) return null;
+  const total = (injury.home?.unavailableCount || 0) + (injury.away?.unavailableCount || 0);
+  if (!total) return null;
+  return `${total} 人伤停`;
 }
 
 export function clearPredictionCache() {

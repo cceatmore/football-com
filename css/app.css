@@ -1360,6 +1360,16 @@ html, body {
   border-bottom: none;
 }
 
+.detail-row--stack {
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-row--stack .value {
+  text-align: left;
+  line-height: 1.5;
+}
+
 .detail-row .label {
   color: var(--text-secondary);
   flex-shrink: 0;
@@ -1626,6 +1636,18 @@ html, body {
   gap: 12px;
 }
 
+.loading--inline {
+  flex-direction: row;
+  padding: 16px 0;
+  justify-content: flex-start;
+}
+
+.loading--inline .spinner {
+  width: 20px;
+  height: 20px;
+  border-width: 2px;
+}
+
 .spinner {
   width: 28px;
   height: 28px;
@@ -1735,6 +1757,135 @@ html, body {
 .prediction-badge--pending {
   background: var(--primary-soft);
   color: var(--primary);
+}
+
+.prediction-badge--pending {
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+
+.prediction-badge--injury {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.prediction-injury-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.injury-team-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.injury-team-block:first-of-type {
+  margin-top: 12px;
+}
+
+.injury-team-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.injury-team-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.injury-team-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.injury-section-title {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.injury-player-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.injury-player {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 2px 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-size: 13px;
+}
+
+.injury-player--ok {
+  border-left: 3px solid var(--success);
+}
+
+.injury-player--out {
+  border-left: 3px solid var(--danger);
+  background: #fef2f2;
+}
+
+.injury-player-no {
+  grid-row: 1 / span 2;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.injury-player-name {
+  font-weight: 600;
+}
+
+.injury-player-meta {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.injury-player-status {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.injury-player--ok .injury-player-status {
+  color: var(--success);
+}
+
+.injury-player--out .injury-player-status {
+  color: var(--danger);
+}
+
+.injury-player-list--compact .injury-player {
+  grid-template-columns: 28px 1fr auto;
+}
+
+.injury-empty {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.injury-impact-list {
+  margin-top: 12px;
 }
 
 .prediction-summary-card {

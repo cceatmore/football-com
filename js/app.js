@@ -18,13 +18,25 @@ import {
   clearPredictionCache,
   probBarHtml,
   outcomeClass,
+  injuryReportHtml,
+  injuryBadgeText,
 } from "./predictions.js";
+import {
+  fetchTeamHistories,
+  getTeamHistoryList,
+  clearMatchHistoryCache,
+  findTeamMatchMeta,
+  resolveTeamInMatch,
+} from "./matchHistory.js";
+import { fetchStandingsForMatches, clearLeagueStandingsCache } from "./leagueStandings.js";
 
 const state = {
   tab: "schedule",
   dayFilter: "all",
   standingsExpandedTeam: null,
   standingsLeagueTab: null,
+  standingsGroups: null,
+  standingsLoading: false,
   matches: [],
   history: [],
   allMatches: [],
@@ -96,6 +108,9 @@ function applyData(data) {
   state.sourceLabel = data.sourceLabel;
   clearPredictionCache();
   state.predictionCache.clear();
+  clearMatchHistoryCache();
+  clearLeagueStandingsCache();
+  state.standingsGroups = null;
 }
 
 function applyFetchedData(data, { notify = false } = {}) {
@@ -326,8 +341,15 @@ function bindMatchCards(container, onClick) {
 }
 
 function historyMatchBodyText(match, team) {
-  const opponent = match.home === team ? match.away : match.home;
-  if (match.finished) return `${formatMatchupText(match)} · ${match.leagueShort || match.group}`;
+  const resolved = resolveTeamInMatch(match, team);
+  const opponent = resolved === match.home ? match.away : match.home;
+  const ht =
+    match.homeHtScore != null && match.awayHtScore != null
+      ? `（半场 ${match.homeHtScore}:${match.awayHtScore}）`
+      : "";
+  if (match.finished) {
+    return `${formatMatchupText(match)}${ht} · ${match.leagueShort || match.group}`;
+  }
   return `vs ${teamLabel(opponent)}（未赛）· ${match.leagueShort || match.group}`;
 }
 
@@ -344,16 +366,14 @@ function historyMatchItemHtml(match, team) {
     </div>`;
 }
 
-function historyTeamBlockHtml(team, excludeMatchId = null) {
-  const matches = getTeamMatches(state.allMatches, team).filter(
-    (m) => excludeMatchId == null || m.id !== excludeMatchId
-  );
-  const meta = teamLeagueMeta(team);
+function historyTeamBlockHtml(team, matches, metaMatch = null) {
+  const meta = teamLeagueMeta(team) || (metaMatch ? `${metaMatch.leagueShort || metaMatch.group}` : null);
+  const displayMatch = findTeamMatchMeta(metaMatch, team) || matches[0] || metaMatch;
 
   return `
     <div class="history-team-block">
       <div class="history-team-header">
-        ${flagHtml(team, 28, matches[0] || state.matches[0])}
+        ${flagHtml(team, 28, displayMatch)}
         <div class="history-team-info">
           <div class="history-team-name">${teamLabel(team)}</div>
           <div class="history-team-meta">${meta || "近期战绩"} · 共 ${matches.length} 场</div>
@@ -367,7 +387,21 @@ function historyTeamBlockHtml(team, excludeMatchId = null) {
     </div>`;
 }
 
-function openMatchDetail(match) {
+function historyTeamBlockLoadingHtml(team, metaMatch = null) {
+  return `
+    <div class="history-team-block">
+      <div class="history-team-header">
+        ${flagHtml(team, 28, metaMatch)}
+        <div class="history-team-info">
+          <div class="history-team-name">${teamLabel(team)}</div>
+          <div class="history-team-meta">正在加载近期战绩…</div>
+        </div>
+      </div>
+      <div class="loading loading--inline"><div class="spinner"></div><span>检索比赛记录</span></div>
+    </div>`;
+}
+
+async function openMatchDetail(match) {
   els.subTitle.textContent = "比赛详情";
   els.subContent.innerHTML = `
     <div class="detail-card">
@@ -378,15 +412,58 @@ function openMatchDetail(match) {
       ${match.hhad?.line ? `<div class="detail-row"><span class="label">让球(${match.hhad.line})</span><span class="value">胜 ${match.hhad.h} / 平 ${match.hhad.d} / 负 ${match.hhad.a}</span></div>` : ""}
       ${match.homeRank != null || match.awayRank != null ? `<div class="detail-row"><span class="label">联赛排名</span><span class="value">${teamLabel(match.home)} ${formatRank(match.homeRank, match.rankLeague) || "—"} · ${teamLabel(match.away)} ${formatRank(match.awayRank, match.rankLeague) || "—"}</span></div>` : ""}
     </div>
-    ${historyTeamBlockHtml(match.home, match.id)}
-    ${historyTeamBlockHtml(match.away, match.id)}
+    ${historyTeamBlockLoadingHtml(match.home, match)}
+    ${historyTeamBlockLoadingHtml(match.away, match)}
   `;
-
   showSubPage();
   scheduleTeamNameMarquee(els.subContent);
+
+  try {
+    const localHome = getTeamMatches(state.allMatches, match.home).filter((m) => m.id !== match.id);
+    const localAway = getTeamMatches(state.allMatches, match.away).filter((m) => m.id !== match.id);
+    const histories = await fetchTeamHistories(match.id);
+    const homeMatches = getTeamHistoryList(histories, "home", localHome, match.home, match.id);
+    const awayMatches = getTeamHistoryList(histories, "away", localAway, match.away, match.id);
+
+    els.subContent.innerHTML = `
+      <div class="detail-card">
+        <h3>⚽ ${match.league || match.group}${match.num ? ` · ${match.num}` : ""}</h3>
+        ${matchCardHtml(match, { static: true, hideMeta: true, hideRound: true })}
+        ${match.finished ? `<div class="detail-row"><span class="label">比分</span><span class="value">${formatMatchupHtml(match)}</span></div>` : ""}
+        ${match.odds ? `<div class="detail-row"><span class="label">胜平负</span><span class="value">${formatOddsShort(match.odds)}</span></div>` : ""}
+        ${match.hhad?.line ? `<div class="detail-row"><span class="label">让球(${match.hhad.line})</span><span class="value">胜 ${match.hhad.h} / 平 ${match.hhad.d} / 负 ${match.hhad.a}</span></div>` : ""}
+        ${match.homeRank != null || match.awayRank != null ? `<div class="detail-row"><span class="label">联赛排名</span><span class="value">${teamLabel(match.home)} ${formatRank(match.homeRank, match.rankLeague) || "—"} · ${teamLabel(match.away)} ${formatRank(match.awayRank, match.rankLeague) || "—"}</span></div>` : ""}
+        ${
+          histories.h2h.length
+            ? `<div class="detail-row detail-row--stack"><span class="label">历史交锋</span><span class="value">${histories.h2h
+                .slice(0, 3)
+                .map((m) => `${m.date} ${teamLabel(m.home)} ${m.homeScore}:${m.awayScore} ${teamLabel(m.away)}`)
+                .join("<br>")}</span></div>`
+            : ""
+        }
+      </div>
+      ${historyTeamBlockHtml(match.home, homeMatches, match)}
+      ${historyTeamBlockHtml(match.away, awayMatches, match)}
+    `;
+    scheduleTeamNameMarquee(els.subContent);
+  } catch (err) {
+    const localHome = getTeamMatches(state.allMatches, match.home).filter((m) => m.id !== match.id);
+    const localAway = getTeamMatches(state.allMatches, match.away).filter((m) => m.id !== match.id);
+    els.subContent.innerHTML = `
+      <div class="detail-card">
+        <h3>⚽ ${match.league || match.group}${match.num ? ` · ${match.num}` : ""}</h3>
+        ${matchCardHtml(match, { static: true, hideMeta: true, hideRound: true })}
+      </div>
+      ${historyTeamBlockHtml(match.home, localHome, match)}
+      ${historyTeamBlockHtml(match.away, localAway, match)}
+      <p class="detail-note">远程战绩加载失败，已显示本地缓存数据。</p>
+    `;
+    console.error(err);
+  }
 }
 
 function getTodayStandingsGroups() {
+  if (state.standingsGroups?.length) return state.standingsGroups;
   const groups = computeAllStandings(state.allMatches, state.matches);
   const todayGroups = new Set(state.matches.map((m) => m.group).filter(Boolean));
   if (todayGroups.size === 0) return groups;
@@ -431,8 +508,7 @@ function bindStandingsSubTabs(container) {
   });
 }
 
-function renderStandings() {
-  const groups = getTodayStandingsGroups();
+function renderStandingsContent(groups) {
   if (!groups.length) {
     els.main.innerHTML = [
       `<div class="empty-state"><div class="icon">📊</div><p>暂无积分榜数据</p></div>`,
@@ -454,10 +530,38 @@ function renderStandings() {
   bindStandingsRows(els.main);
 }
 
+async function renderStandings() {
+  if (!state.matches.length) {
+    renderStandingsContent([]);
+    return;
+  }
+
+  if (!state.standingsGroups && !state.standingsLoading) {
+    state.standingsLoading = true;
+    els.main.innerHTML = [
+      `<div class="loading"><div class="spinner"></div><span>加载联赛积分榜…</span></div>`,
+      dataSourceNote(),
+    ].join("");
+
+    try {
+      const remoteGroups = await fetchStandingsForMatches(state.matches);
+      if (remoteGroups.length) {
+        state.standingsGroups = remoteGroups;
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      state.standingsLoading = false;
+    }
+  }
+
+  renderStandingsContent(getTodayStandingsGroups());
+}
+
 function renderPredictions() {
   const matches = sortMatchesByTime(state.matches.filter((m) => !m.finished));
   els.main.innerHTML = [
-    `<p class="predictions-intro">检索中国体彩官方数据、市场赔率与 Forebet 泊松模型，融合生成每场分析。</p>`,
+    `<p class="predictions-intro">检索中国体彩官方数据、市场赔率、Forebet 泊松模型与伤停情报，融合生成每场分析。</p>`,
     matches.length
       ? matches.map((m) => predictionCardHtml(m)).join("")
       : `<div class="empty-state"><div class="icon">🔮</div><p>当前暂无待预测场次</p></div>`,
@@ -472,14 +576,18 @@ function renderPredictions() {
 function predictionCardHtml(m) {
   const cached = state.predictionCache.get(m.id);
   const pick = cached?.summary?.pick;
+  const injuryNote = injuryBadgeText(cached?.injury);
   const badge = pick
     ? `<span class="prediction-badge prediction-badge--${outcomeClass(pick.key)}">倾向 ${pick.short} ${Math.round(pick.prob * 100)}%</span>`
     : `<span class="prediction-badge prediction-badge--pending">点击分析</span>`;
+  const injuryBadge = injuryNote
+    ? `<span class="prediction-badge prediction-badge--injury">${injuryNote}</span>`
+    : "";
 
   return `
     <article class="match-card prediction-card" data-match-id="${m.id}">
       ${matchCardHtml(m, { asInner: true, hideMeta: true, showRank: true })}
-      <div class="prediction-card-footer">${badge}</div>
+      <div class="prediction-card-footer">${badge}${injuryBadge}</div>
     </article>`;
 }
 
@@ -523,6 +631,8 @@ function predictionDetailHtml(match, analysis) {
       ${probBarHtml(summary.probs)}
     </div>
 
+    ${injuryReportHtml(analysis.injury, match)}
+
     ${sources
       .map(
         (src) => `
@@ -563,13 +673,14 @@ function predictionDetailHtml(match, analysis) {
       </ul>
     </div>
 
-    <p class="predictions-disclaimer">数据来源：中国体彩官方 API、竞彩 SP 赔率（市场共识）、Forebet 泊松模型方法论。预测仅供参考，请理性看球。</p>
+    <p class="predictions-disclaimer">数据来源：中国体彩官方 API（含伤停/射手）、竞彩 SP 赔率、Forebet 泊松模型方法论。预测仅供参考，请理性看球。</p>
   `;
 }
 
 function teamMatchResultLabel(match, team) {
   if (!match.finished) return "未赛";
-  const isHome = match.home === team;
+  const resolved = resolveTeamInMatch(match, team);
+  const isHome = resolved === match.home;
   const gf = isHome ? match.homeScore : match.awayScore;
   const ga = isHome ? match.awayScore : match.homeScore;
   if (gf > ga) return "胜";
@@ -615,11 +726,20 @@ function bindStandingsRows(container) {
   });
 }
 
+function findStandingsMatchMeta(group, team) {
+  return state.matches.find((m) => {
+    if (m.group !== group) return false;
+    const resolved = resolveTeamInMatch(m, team);
+    return resolved === m.home || resolved === m.away;
+  });
+}
+
 function standingsGroupHtml({ group, groupLabel, mode, rows }, opts = {}) {
   const isOfficial = mode === "official";
+  const isLeague = mode === "league";
   const header = opts.hideHeader
-    ? `<div class="group-header group-header--compact">${isOfficial ? "官方排名" : "赛果统计"}</div>`
-    : `<div class="group-header">${groupLabel || group}${isOfficial ? " · 官方排名" : ""}</div>`;
+    ? `<div class="group-header group-header--compact">${isOfficial ? "官方排名" : isLeague ? "官方积分榜" : "赛果统计"}</div>`
+    : `<div class="group-header">${groupLabel || group}${isOfficial ? " · 官方排名" : isLeague ? " · 官方积分榜" : ""}</div>`;
   return `
     <div class="group-card">
       ${header}
@@ -639,12 +759,13 @@ function standingsGroupHtml({ group, groupLabel, mode, rows }, opts = {}) {
                 ? `<td>${r.rankLabel || r.rank || "—"}</td>`
                 : `<td>${r.mp}</td><td>${r.w}</td><td>${r.d}</td><td>${r.l}</td><td>${r.gf}</td><td>${r.ga}</td><td>${r.gd > 0 ? "+" + r.gd : r.gd}</td><td>${r.pts}</td>`;
               const colspan = isOfficial ? 3 : 10;
+              const metaMatch = findStandingsMatchMeta(group, r.team);
               return `
             <tr class="standings-team-row${expanded ? " expanded" : ""}" data-team="${r.team}" aria-expanded="${expanded}">
-              <td class="rank">${isOfficial ? r.rank : i + 1}</td>
+              <td class="rank">${isOfficial ? r.rank : r.rank ?? i + 1}</td>
               <td>
                 <div class="team-cell">
-                  ${flagHtml(r.team, 20, state.matches.find((m) => m.home === r.team || m.away === r.team))}
+                  ${flagHtml(r.team, 20, metaMatch)}
                   <span class="team-cell-name">${teamLabel(r.team)}</span>
                   <span class="standings-expand-icon" aria-hidden="true"></span>
                 </div>
