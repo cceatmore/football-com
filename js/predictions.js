@@ -94,7 +94,7 @@ const PRIORITY_TIP_SITES = [
 
 const cache = new Map();
 /** 预测结果结构版本；变更后自动丢弃旧缓存（避免串场摘要残留） */
-export const ANALYSIS_SCHEMA = 6;
+export const ANALYSIS_SCHEMA = 8;
 
 /** 赔率/资讯站，不做预测摘要 */
 const BLOCKED_HOSTS = [
@@ -127,7 +127,7 @@ async function fetchUniform(path) {
   }
 }
 
-async function fetchText(url, timeoutMs = 12000) {
+async function fetchText(url, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -145,7 +145,7 @@ async function fetchText(url, timeoutMs = 12000) {
   }
 }
 
-async function fetchViaJina(url, timeoutMs = 14000) {
+async function fetchViaJina(url, timeoutMs = 8000) {
   return fetchText(`${JINA_PREFIX}${url}`, timeoutMs);
 }
 
@@ -301,23 +301,13 @@ function summarizeInjuryPlayers(team, players) {
 }
 
 function buildSideInjurySummary(teamLabel, sideData, playerSide) {
-  const unavailableList = sideData?.injuriesAndSuspensionsList || [];
+  // 仅统计体彩关键球员伤停，忽略大名单里的替补伤停
   const keyPlayers = playerSide?.playerList || [];
   const out = [];
 
   for (const p of keyPlayers) {
     const status = playerOutStatus(p);
     if (!status) continue;
-    out.push({
-      position: normalizePosition(p.playerPositionDesc || p.playerPositionCode),
-      status,
-    });
-  }
-
-  const keyIds = new Set(keyPlayers.map((p) => p.personId));
-  for (const p of unavailableList) {
-    if (keyIds.has(p.personId)) continue;
-    const status = playerOutStatus(p) || "伤停";
     out.push({
       position: normalizePosition(p.playerPositionDesc || p.playerPositionCode),
       status,
@@ -336,6 +326,17 @@ function parseIasPositionToken(token) {
   return "未知位置";
 }
 
+/** IAS 统计括号：出场少的视为替补/边缘，不展示 */
+function isIasKeyPlayerToken(token) {
+  const t = String(token || "").toLowerCase();
+  if (/left the club|newcomer|loan from/i.test(t)) return false;
+  // 主力门将 / 核心即使赛季出场为 0 也保留
+  if (/first\s+goalkeeper|top scorer|captain/i.test(t)) return true;
+  const m = t.match(/(\d+)\s*\/\s*\d+/);
+  if (!m) return false;
+  return Number(m[1]) >= 3;
+}
+
 function parseIasOutLine(line, status) {
   const text = String(line || "");
   if (!text || /^[-–—]$/.test(text.trim())) return [];
@@ -350,20 +351,10 @@ function parseIasOutLine(line, status) {
     if (!/\d+\s*\/\s*\d+/.test(token) && !/^(?:first\s+)?(?:goalkeeper|[gdmf])\b/i.test(token)) {
       continue;
     }
+    if (!isIasKeyPlayerToken(token)) continue;
     players.push({ position: parseIasPositionToken(token), status });
   }
-  // 无括号时按逗号人数兜底（位置未知）
-  if (
-    !players.length &&
-    /(?:doubtful|out\s*\(|suspended:)/i.test(text) &&
-    !/:\s*[-–—]\s*$/i.test(text)
-  ) {
-    const body = text.split(":").slice(1).join(":").trim();
-    if (body && body !== "-" && body !== "–") {
-      const n = body.split(",").map((x) => x.trim()).filter(Boolean).length;
-      for (let i = 0; i < n; i += 1) players.push({ position: "未知位置", status });
-    }
-  }
+  // 无可靠出场统计时不按逗号兜底（易把替补算进去）
   return players;
 }
 
@@ -480,89 +471,19 @@ function extractLatestTeamIasPlayers(markdown, teamNames) {
   return best;
 }
 
-function isIasArticleUrl(url, leagueSlug) {
-  if (!/injuriesandsuspensions\.com\//i.test(url)) return false;
-  if (/\/(subscription|contact|api-injuries|hot-info|all-news|about|checkout|privacy)\/?/i.test(url)) {
-    return false;
-  }
-  if (!/injuries-suspensions-\d+/i.test(url)) return false;
-  if (leagueSlug && !url.includes(leagueSlug)) return false;
-  return true;
-}
-
-async function collectTeamIasPages(teamNames, leagueSlug) {
-  // 优先用更完整的英文队名做站内搜索（如 Djurgårdens IF > Djurgarden）
-  const en =
-    [...teamNames]
+function bestEnglishName(names) {
+  return (
+    [...(names || [])]
       .filter((n) => /[A-Za-zÄÖÅäöå]/.test(n))
-      .sort((a, b) => String(b).length - String(a).length)[0] || teamNames[0];
-  if (!en) return [];
-
-  const seedUrls = [];
-  if (leagueSlug) seedUrls.push(`https://injuriesandsuspensions.com/${leagueSlug}/`);
-  seedUrls.push(`https://injuriesandsuspensions.com/?s=${encodeURIComponent(en)}`);
-
-  const pages = [];
-  const seen = new Set();
-
-  const pushPage = async (url, timeoutMs = 14000) => {
-    const key = url.replace(/\/$/, "");
-    if (seen.has(key)) return;
-    seen.add(key);
-    const body = await fetchViaJina(url, timeoutMs);
-    if (body) pages.push({ url, body });
-  };
-
-  for (const seed of seedUrls) {
-    await pushPage(seed);
-    if (pages.length >= 6) break;
-    const last = pages[pages.length - 1];
-    if (!last) continue;
-
-    const articleLinks = [
-      ...new Set(
-        [...last.body.matchAll(/https?:\/\/injuriesandsuspensions\.com\/[^\s)\]"'<>]+/gi)].map((m) =>
-          m[0].replace(/[.,)>]+$/, "")
-        )
-      ),
-    ]
-      // 站内搜索已按队名筛选；不强制联赛 slug（巴西杯常落在巴西甲文章里）
-      .filter((u) => isIasArticleUrl(u, ""))
-      .slice(0, 4);
-
-    for (const link of articleLinks) {
-      await pushPage(link, 12000);
-      if (pages.length >= 6) break;
-    }
-  }
-
-  // DDG 兜底：栏目/搜索未命中时再试
-  if (pages.length < 2) {
-    const q = leagueSlug
-      ? `site:injuriesandsuspensions.com ${leagueSlug.replace(/-/g, " ")} "${en}"`
-      : `site:injuriesandsuspensions.com "${en}"`;
-    const md = await fetchViaJina(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`);
-    const links = [
-      ...new Set(
-        [...(md || "").matchAll(/https?:\/\/[^\s)\]"'<>]+/g)]
-          .map((x) => unwrapDuckUrl(x[0]))
-          .filter((u) => isIasArticleUrl(u, leagueSlug) || isIasArticleUrl(u, ""))
-      ),
-    ].slice(0, 3);
-    for (const link of links) {
-      await pushPage(link, 12000);
-      if (pages.length >= 6) break;
-    }
-  }
-
-  return pages;
+      .sort((a, b) => String(b).length - String(a).length)[0] || names?.[0] || ""
+  );
 }
 
-async function fetchTeamWebInjuryPlayers(teamNames, leagueSlug) {
-  const pages = await collectTeamIasPages(teamNames, leagueSlug);
+function pickBestIasPlayers(pages, teamNames) {
   let best = { players: [], dateMs: -1 };
   for (const page of pages) {
-    const got = extractLatestTeamIasPlayers(page.body, teamNames);
+    if (!page) continue;
+    const got = extractLatestTeamIasPlayers(page, teamNames);
     if (got.dateMs < 0) continue;
     if (got.dateMs > best.dateMs || (got.dateMs === best.dateMs && got.players.length > best.players.length)) {
       best = got;
@@ -571,22 +492,31 @@ async function fetchTeamWebInjuryPlayers(teamNames, leagueSlug) {
   return best.players;
 }
 
+/** 伤停快路径：联赛首页 + 双方站内搜索，最多 3 个并行请求 */
 async function fetchWebInjuries(match) {
   const homeNames = teamSearchNames(match.home);
   const awayNames = teamSearchNames(match.away);
   const leagueSlug = LEAGUE_IAS_SLUGS[match.leagueShort || match.group] || "";
+  const homeEn = bestEnglishName(homeNames);
+  const awayEn = bestEnglishName(awayNames);
 
-  const [homePlayers, awayPlayers] = await Promise.all([
-    fetchTeamWebInjuryPlayers(homeNames, leagueSlug),
-    fetchTeamWebInjuryPlayers(awayNames, leagueSlug),
-  ]);
+  const urls = [];
+  if (leagueSlug) urls.push(`https://injuriesandsuspensions.com/${leagueSlug}/`);
+  if (homeEn) urls.push(`https://injuriesandsuspensions.com/?s=${encodeURIComponent(homeEn)}`);
+  if (awayEn && awayEn !== homeEn) {
+    urls.push(`https://injuriesandsuspensions.com/?s=${encodeURIComponent(awayEn)}`);
+  }
+
+  const bodies = await Promise.all(urls.map((u) => fetchViaJina(u, 7000)));
+  const homePlayers = pickBestIasPlayers(bodies, homeNames);
+  const awayPlayers = pickBestIasPlayers(bodies, awayNames);
 
   if (!homePlayers.length && !awayPlayers.length) return null;
 
   return {
     source: "injury-web",
     name: "伤停情报",
-    tagline: "Injuries&Suspensions 公开源 · 位置人数",
+    tagline: "Injuries&Suspensions · 仅主力",
     home: summarizeInjuryPlayers(match.home, homePlayers),
     away: summarizeInjuryPlayers(match.away, awayPlayers),
     provider: "injuriesandsuspensions.com",
@@ -604,7 +534,7 @@ function buildInjuryAnalysis(match, intel, webInjury = null) {
     return {
       source: "injury",
       name: "伤停情报",
-      tagline: webInjury.tagline || "公开伤停源 · 位置人数",
+      tagline: webInjury.tagline || "公开伤停源 · 仅主力",
       home: webInjury.home.total ? webInjury.home : officialHome || emptyInjurySide(match.home),
       away: webInjury.away.total ? webInjury.away : officialAway || emptyInjurySide(match.away),
     };
@@ -615,7 +545,7 @@ function buildInjuryAnalysis(match, intel, webInjury = null) {
   return {
     source: "injury",
     name: "伤停情报",
-    tagline: officialTotal ? "体彩官方 · 位置人数" : "暂无公开伤停记录",
+    tagline: officialTotal ? "体彩官方 · 仅主力关键" : "暂无主力伤停记录",
     home: officialHome || emptyInjurySide(match.home),
     away: officialAway || emptyInjurySide(match.away),
   };
@@ -887,40 +817,24 @@ function extractTipSnippet(text, homeNames, awayNames) {
 async function searchWebTips(match) {
   const homeNames = teamSearchNames(match.home);
   const awayNames = teamSearchNames(match.away);
-  const homeEn =
-    [...homeNames].filter((n) => /[A-Za-zÄÖÅäöå]/.test(n)).sort((a, b) => b.length - a.length)[0] ||
-    homeNames[0];
-  const awayEn =
-    [...awayNames].filter((n) => /[A-Za-zÄÖÅäöå]/.test(n)).sort((a, b) => b.length - a.length)[0] ||
-    awayNames[0];
+  const homeEn = bestEnglishName(homeNames);
+  const awayEn = bestEnglishName(awayNames);
 
+  // 只跑 3 路并行搜索（原先串行 8~10 次是 3 分钟主因）
   const queries = [
-    ...PRIORITY_TIP_SITES.map((site) => `site:${site} ${homeEn} ${awayEn} prediction`),
-    `${homeEn} vs ${awayEn} prediction tip preview`,
-    `${match.home} ${match.away} 足球 预测`,
+    `site:predictz.com OR site:betimate.com OR site:betclan.com ${homeEn} ${awayEn}`,
+    `site:forebet.com OR site:windrawwin.com ${homeEn} ${awayEn} prediction`,
+    `${homeEn} vs ${awayEn} prediction tip`,
   ];
 
-  const collected = [];
-  for (const q of queries) {
-    const md = await fetchViaJina(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`);
-    const items = extractSearchResults(md);
-    collected.push(...items);
-  }
+  const pages = await Promise.all(
+    queries.map((q) =>
+      fetchViaJina(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, 6500)
+    )
+  );
 
   const dedup = new Map();
-  for (const item of collected) {
-    if (isBlockedResult(item)) continue;
-    const key = item.url.replace(/\/$/, "").toLowerCase();
-    if (!dedup.has(key)) dedup.set(key, item);
-  }
-
-  // 若优先机构缺失，补一条更窄的站内检索
-  const hosts = [...dedup.values()].map((i) => hostOf(i.url));
-  for (const site of ["predictz.com", "windrawwin.com"]) {
-    if (hosts.some((h) => h.includes(site))) continue;
-    const md = await fetchViaJina(
-      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:${site} "${homeEn}" "${awayEn}"`)}`
-    );
+  for (const md of pages) {
     for (const item of extractSearchResults(md)) {
       if (isBlockedResult(item)) continue;
       const key = item.url.replace(/\/$/, "").toLowerCase();
@@ -932,18 +846,11 @@ async function searchWebTips(match) {
     .map((item) => ({ ...item, score: scoreResult(item, homeNames, awayNames) }))
     .filter((item) => item.score >= 10)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 10);
+    .slice(0, 6);
 }
 
-async function enrichTipPage(item, homeNames, awayNames, match) {
-  // 先按标题/URL 校验本场，禁止靠列表页正文“碰巧出现队名”蒙混过关
-  if (!isMatchSpecificResult(item, homeNames, awayNames)) return null;
-
-  const page = await fetchViaJina(item.url, 14000);
-  const rawTitle = item.title.replace(/\*\*/g, "").trim();
-  const corpus = `${rawTitle}\n${item.snippet || ""}\n${page || ""}`;
-  const host = hostOf(item.url);
-
+function buildTipFromCorpus(corpus, homeNames, awayNames, match, url, rawTitle) {
+  const host = hostOf(url);
   let probs = extractMatchProbs(corpus);
   let pickKey = detectPickFromText(corpus, homeNames, awayNames);
   if (!pickKey && probs) pickKey = pickOutcome(probs)?.key || null;
@@ -951,28 +858,37 @@ async function enrichTipPage(item, homeNames, awayNames, match) {
   const extras = host.includes("predictz.com") ? extractPredictZExtras(corpus) : [];
   let tipText = formatChineseTip(pickKey, probs, extras);
 
-  // 仍无结构化观点时，尝试英文摘要再降级为中文倾向句
-  if (!tipText) {
-    const pageTip = extractTipSnippet(page || "", homeNames, awayNames);
-    if (pageTip && !isUselessTip(pageTip, rawTitle) && !isNoiseTipLine(pageTip)) {
-      tipText = pickKey
-        ? `倾向${OUTCOMES.find((o) => o.key === pickKey)?.label || "参考"}。原文要点：${pageTip.slice(0, 100)}`
-        : `原文要点：${pageTip.slice(0, 120)}`;
-    }
+  if (!tipText && pickKey) {
+    tipText = `倾向${OUTCOMES.find((o) => o.key === pickKey)?.label || "参考"}`;
   }
 
   if (!tipText || !pickKey) return null;
-
   const pick = OUTCOMES.find((o) => o.key === pickKey);
   return {
-    name: sourceLabel(item.url),
-    url: item.url,
+    name: sourceLabel(url),
+    url,
     title: `${match.home}对阵${match.away} · 预测观点`,
     tipText: tipText.slice(0, 200),
     pick: pick ? { ...pick, prob: probs?.[pickKey] ?? null } : null,
     probs,
-    trusted: isTrustedHost(item.url),
+    trusted: isTrustedHost(url),
   };
+}
+
+async function enrichTipPage(item, homeNames, awayNames, match) {
+  if (!isMatchSpecificResult(item, homeNames, awayNames)) return null;
+
+  const rawTitle = item.title.replace(/\*\*/g, "").trim();
+  const head = `${rawTitle}\n${item.snippet || ""}`;
+
+  // 搜索摘要里已有概率/倾向时，跳过正文抓取
+  const quick = buildTipFromCorpus(head, homeNames, awayNames, match, item.url, rawTitle);
+  if (quick?.probs || (quick?.pick && /PREDICTZ TIP|Home win|倾向/i.test(head))) {
+    return quick;
+  }
+
+  const page = await fetchViaJina(item.url, 7000);
+  return buildTipFromCorpus(`${head}\n${page || ""}`, homeNames, awayNames, match, item.url, rawTitle);
 }
 
 function buildConsensus(sources) {
@@ -1030,28 +946,36 @@ export async function fetchWebPredictions(match) {
     const host = hostOf(item.url) || item.url;
     if (!byHost.has(host)) byHost.set(host, item);
   }
-  // 多取几家再富化，最终保留有中文观点的 5 条
   const preferred = PRIORITY_TIP_SITES.map((h) =>
     [...byHost.entries()].find(([host]) => host.includes(h))?.[1]
   ).filter(Boolean);
   const rest = [...byHost.values()].filter((item) => !preferred.includes(item));
-  const top = [...preferred, ...rest].slice(0, 8);
-  const enriched = await Promise.all(
-    top.map((item) => enrichTipPage(item, homeNames, awayNames, match))
-  );
-  const sources = enriched
-    .filter(
-      (s) =>
+  const top = [...preferred, ...rest].slice(0, 5);
+
+  // 并发抓取，凑满 3 家有效观点即可提前结束后续等待感（仍等当前批次）
+  const sources = [];
+  const batches = [top.slice(0, 3), top.slice(3)];
+  for (const batch of batches) {
+    if (!batch.length || sources.length >= 3) break;
+    const enriched = await Promise.all(
+      batch.map((item) => enrichTipPage(item, homeNames, awayNames, match))
+    );
+    for (const s of enriched) {
+      if (
         s &&
         s.pick &&
         s.tipText &&
         !isUselessTip(s.tipText, s.title) &&
         !/体育书|必胜\s*\||^\d{4}-\d{2}-\d{2}/.test(s.tipText)
-    )
-    .slice(0, 5);
+      ) {
+        sources.push(s);
+      }
+    }
+  }
+
   return {
-    consensus: buildConsensus(sources),
-    sources,
+    consensus: buildConsensus(sources.slice(0, 5)),
+    sources: sources.slice(0, 5),
   };
 }
 
@@ -1071,20 +995,13 @@ export async function fetchInjuryAnalysis(match) {
   return buildInjuryAnalysis(match, intel, webInjury);
 }
 
-export async function fetchAndAnalyzeMatch(match) {
-  const cached = cache.get(match.id);
-  if (cached?.schema === ANALYSIS_SCHEMA) return cached;
-
-  const [intel, web, webInjury] = await Promise.all([
-    fetchMatchIntel(match.id),
-    fetchWebPredictions(match),
-    fetchWebInjuries(match),
-  ]);
-  const injury = buildInjuryAnalysis(match, intel, webInjury);
-  const analysis = {
+function buildAnalysisPayload(match, web, injury, { complete = true, injuryPending = false } = {}) {
+  return {
     schema: ANALYSIS_SCHEMA,
     matchId: match.id,
     updatedAt: new Date().toISOString(),
+    complete,
+    injuryPending,
     consensus: web.consensus,
     sources: web.sources,
     injury,
@@ -1097,12 +1014,51 @@ export async function fetchAndAnalyzeMatch(match) {
       bullets: web.consensus.bullets,
     },
   };
+}
 
+/**
+ * 先返回机构预测（可 onUpdate 渐进渲染），伤停在后台补齐。
+ * @param {{ onUpdate?: (analysis: object) => void }} [options]
+ */
+export async function fetchAndAnalyzeMatch(match, options = {}) {
+  const { onUpdate } = options;
+  const cached = cache.get(match.id);
+  if (cached?.schema === ANALYSIS_SCHEMA && cached.complete) return cached;
+
+  const intelP = fetchMatchIntel(match.id);
+  const webP = fetchWebPredictions(match);
+  const injuryP = fetchWebInjuries(match);
+
+  // 先等预测 + 体彩官方伤停，尽快出首屏
+  const [intel, web] = await Promise.all([intelP, webP]);
+  let analysis = buildAnalysisPayload(
+    match,
+    web,
+    buildInjuryAnalysis(match, intel, null),
+    { complete: false, injuryPending: true }
+  );
   cache.set(match.id, analysis);
+  onUpdate?.(analysis);
+
+  // 再补网页伤停（通常再等几秒）
+  try {
+    const webInjury = await injuryP;
+    analysis = buildAnalysisPayload(match, web, buildInjuryAnalysis(match, intel, webInjury), {
+      complete: true,
+      injuryPending: false,
+    });
+  } catch {
+    analysis = { ...analysis, complete: true, injuryPending: false };
+  }
+  cache.set(match.id, analysis);
+  onUpdate?.(analysis);
   return analysis;
 }
 
-export function injuryReportHtml(injury, match) {
+export function injuryReportHtml(injury, match, { pending = false } = {}) {
+  if (pending && !injury?.home?.total && !injury?.away?.total) {
+    return `<div class="prediction-injury-card"><p class="injury-empty">伤停情报加载中…</p></div>`;
+  }
   if (!injury) {
     return `<div class="prediction-injury-card"><p class="injury-empty">暂无伤停数据</p></div>`;
   }
@@ -1113,7 +1069,7 @@ export function injuryReportHtml(injury, match) {
         <div class="injury-team-block injury-team-block--compact">
           <div class="injury-team-header">
             <span class="injury-team-name">${label}</span>
-            <span class="injury-team-count">无伤停</span>
+            <span class="injury-team-count">无主力伤停</span>
           </div>
         </div>`;
     }
@@ -1121,7 +1077,7 @@ export function injuryReportHtml(injury, match) {
       <div class="injury-team-block injury-team-block--compact">
         <div class="injury-team-header">
           <span class="injury-team-name">${label}</span>
-          <span class="injury-team-count">${side.total} 人伤停</span>
+          <span class="injury-team-count">${side.total} 名主力伤停</span>
         </div>
         <div class="injury-pos-chips">
           ${side.lines.map((line) => `<span class="injury-pos-chip">${line}</span>`).join("")}
@@ -1146,7 +1102,7 @@ export function injuryBadgeText(injury) {
   if (!injury) return null;
   const total = (injury.home?.total || 0) + (injury.away?.total || 0);
   if (!total) return null;
-  return `${total} 人伤停`;
+  return `${total} 名主力伤停`;
 }
 
 export function clearPredictionCache() {

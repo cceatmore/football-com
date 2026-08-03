@@ -630,24 +630,158 @@ function predictionCardHtml(m) {
     </article>`;
 }
 
+function formResultClass(result) {
+  if (result === "胜") return "win";
+  if (result === "负") return "loss";
+  if (result === "平") return "draw";
+  return "pending";
+}
+
+function formStatText(matches, team) {
+  let w = 0;
+  let d = 0;
+  let l = 0;
+  let homeN = 0;
+  let awayN = 0;
+  for (const m of matches || []) {
+    const result = teamResultLabel(m, team);
+    if (result === "胜") w += 1;
+    else if (result === "平") d += 1;
+    else if (result === "负") l += 1;
+    const resolved = resolveTeamInMatch(m, team);
+    if (resolved === m.home) homeN += 1;
+    else if (resolved === m.away) awayN += 1;
+  }
+  return `${w}胜${d}平${l}负 · 主${homeN}客${awayN}`;
+}
+
+function formMatchTimeMs(match) {
+  if (match?.utc) {
+    const ms = new Date(match.utc).getTime();
+    if (Number.isFinite(ms)) return ms;
+  }
+  const date = String(match?.date || match?.beijingDateKey || "");
+  const time = String(match?.time || match?.beijingTime || "00:00").slice(0, 5);
+  if (!date) return 0;
+  const ms = Date.parse(`${date}T${time}:00`);
+  return Number.isNaN(ms) ? Date.parse(`${date}T00:00:00`) || 0 : ms;
+}
+
+/** 近 10 场横向色条：左侧最久，右侧最近；格内标注主/客 */
+function predictionFormBarHtml(team, matches, { pending = false } = {}) {
+  // 先取最近 10 场（时间新→旧），再按时间正序排成 左旧 → 右新
+  const recent = (matches || [])
+    .filter((m) => m.finished)
+    .sort((a, b) => formMatchTimeMs(b) - formMatchTimeMs(a))
+    .slice(0, 10);
+  const ordered = [...recent].sort((a, b) => formMatchTimeMs(a) - formMatchTimeMs(b));
+  const segs = ordered
+    .map((m) => {
+      const result = teamResultLabel(m, team);
+      const cls = formResultClass(result);
+      const resolved = resolveTeamInMatch(m, team);
+      const venue = resolved === m.home ? "主" : resolved === m.away ? "客" : "—";
+      const when = formatMatchWhen(m) || "";
+      const tip = `${venue}场 ${result}${when ? ` · ${when}` : ""}`;
+      return `<span class="form-seg form-seg--${cls}" title="${tip}">${venue}</span>`;
+    })
+    .join("");
+
+  return `
+    <div class="form-team-row">
+      <div class="form-team-head">
+        <span class="form-team-name">${teamLabel(team)}</span>
+        <span class="form-team-stat">${pending ? "加载中…" : recent.length ? formStatText(recent, team) : "暂无赛果"}</span>
+      </div>
+      <div class="form-bar${pending ? " form-bar--pending" : ""}" aria-label="${teamLabel(team)}近10场主客赛况，左旧右新">
+        ${
+          pending
+            ? `<span class="form-seg form-seg--pending">…</span>`.repeat(10)
+            : segs || `<span class="form-bar-empty">暂无最近赛果</span>`
+        }
+      </div>
+    </div>`;
+}
+
+function predictionFormCardHtml(match, form) {
+  const pending = !form || form.pending;
+  return `
+    <div class="prediction-form-card">
+      <div class="prediction-form-card-head">
+        <div class="prediction-source-name">近期主客赛况</div>
+        <div class="prediction-source-tag">近 10 场 · 左最久 / 右最近 · 绿胜 / 蓝平 / 红负</div>
+      </div>
+      ${predictionFormBarHtml(match.home, form?.home, { pending })}
+      ${predictionFormBarHtml(match.away, form?.away, { pending })}
+    </div>`;
+}
+
+async function loadPredictionForm(match) {
+  const local = state.allMatches || [];
+  const [home, away] = await Promise.all([
+    fetchTeamRecentForm(match.home, { matchId: match.id, localMatches: local }),
+    fetchTeamRecentForm(match.away, { matchId: match.id, localMatches: local }),
+  ]);
+  return {
+    pending: false,
+    home: (home || []).filter((m) => m.finished).slice(0, 10),
+    away: (away || []).filter((m) => m.finished).slice(0, 10),
+  };
+}
+
 async function openPredictionDetail(match) {
   els.subTitle.textContent = "预测分析";
   els.subContent.innerHTML = `
-    <div class="loading"><div class="spinner"></div><span>正在检索全网机构预测…</span></div>
+    <div class="loading"><div class="spinner"></div><span>正在检索机构预测…</span></div>
   `;
   showSubPage();
 
+  let form = state.predictionCache.get(match.id)?.form || { pending: true, home: [], away: [] };
+
+  const render = (analysis) => {
+    if (els.subTitle.textContent !== "预测分析") return;
+    const merged = { ...analysis, form };
+    els.subContent.innerHTML = predictionDetailHtml(match, merged);
+    scheduleTeamNameMarquee(els.subContent);
+  };
+
+  const formPromise = form.pending
+    ? loadPredictionForm(match)
+        .then((data) => {
+          form = data;
+          const cached = state.predictionCache.get(match.id);
+          if (cached) {
+            const merged = { ...cached, form };
+            state.predictionCache.set(match.id, merged);
+            render(merged);
+          }
+        })
+        .catch(() => {
+          form = { pending: false, home: [], away: [] };
+        })
+    : Promise.resolve(form);
+
   try {
     let analysis = state.predictionCache.get(match.id);
-    if (!analysis || analysis.schema !== ANALYSIS_SCHEMA) {
+    if (!analysis || analysis.schema !== ANALYSIS_SCHEMA || !analysis.complete) {
       state.predictionLoadingId = match.id;
-      analysis = await fetchAndAnalyzeMatch(match);
+      analysis = await fetchAndAnalyzeMatch(match, {
+        onUpdate: (partial) => {
+          const merged = { ...partial, form };
+          state.predictionCache.set(match.id, merged);
+          render(merged);
+          if (state.tab === "predictions") renderPredictions();
+        },
+      });
+      analysis = { ...analysis, form };
       state.predictionCache.set(match.id, analysis);
       state.predictionLoadingId = null;
       if (state.tab === "predictions") renderPredictions();
     }
-    els.subContent.innerHTML = predictionDetailHtml(match, analysis);
-    scheduleTeamNameMarquee(els.subContent);
+    await formPromise;
+    analysis = { ...analysis, form };
+    state.predictionCache.set(match.id, analysis);
+    render(analysis);
   } catch (err) {
     els.subContent.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>预测检索失败，请稍后重试</p></div>`;
     console.error(err);
@@ -679,10 +813,12 @@ function predictionDetailHtml(match, analysis) {
       }
     </div>
 
+    ${predictionFormCardHtml(match, analysis.form)}
+
     <div class="prediction-section-title">各家观点摘要</div>
     ${webSourcesHtml(analysis.sources || [])}
 
-    ${injuryReportHtml(analysis.injury, match)}
+    ${injuryReportHtml(analysis.injury, match, { pending: !!analysis.injuryPending })}
 
     <p class="predictions-disclaimer">预测为公开网页检索后的机构观点摘要，伤停仅统计缺阵位置与人数。内容仅供参考，请理性看球。</p>
   `;

@@ -2129,6 +2129,98 @@ html, body {
   color: var(--text-secondary);
 }
 
+.prediction-form-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 16px;
+  margin-bottom: 12px;
+}
+
+.prediction-form-card-head {
+  margin-bottom: 12px;
+}
+
+.form-team-row + .form-team-row {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.form-team-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.form-team-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.form-team-stat {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.form-bar {
+  display: flex;
+  width: 100%;
+  height: 28px;
+  gap: 3px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.form-bar--pending {
+  opacity: 0.55;
+}
+
+.form-seg {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  border-radius: 5px;
+  letter-spacing: 0.02em;
+}
+
+.form-seg--win {
+  background: var(--success);
+}
+
+.form-seg--draw {
+  background: #2563eb;
+}
+
+.form-seg--loss {
+  background: var(--danger);
+}
+
+.form-seg--pending {
+  background: var(--surface-2, #e5e7eb);
+  color: var(--text-secondary);
+}
+
+.form-bar-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-2, #f3f4f6);
+  border-radius: 8px;
+}
+
 .prediction-tip-text {
   margin: 0;
   font-size: 13px;
