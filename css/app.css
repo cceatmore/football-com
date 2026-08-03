@@ -312,12 +312,13 @@ html, body {
 
 .history-match-item--compact {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 6px 8px;
   border-radius: 8px;
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.45;
   border: 1px solid transparent;
 }
 
@@ -364,38 +365,20 @@ html, body {
 }
 
 .history-match-item--compact .history-match-body {
-  flex: 1;
+  flex: 1 1 12rem;
   min-width: 0;
   color: var(--text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.history-opp-rank-badge {
-  flex-shrink: 0;
-  min-width: 28px;
-  text-align: center;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.08);
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
-.history-opp-rank-badge--empty {
-  font-weight: 500;
-  color: var(--muted);
-  background: rgba(15, 23, 42, 0.04);
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  word-break: break-word;
 }
 
 .history-opp-rank {
-  margin-left: 2px;
+  margin-left: 3px;
   font-size: 11px;
   font-weight: 700;
-  color: var(--primary);
+  color: #2563eb;
   font-variant-numeric: tabular-nums;
 }
 

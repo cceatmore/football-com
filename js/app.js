@@ -445,6 +445,20 @@ function bindMatchCards(container, onClick) {
   });
 }
 
+/** 本年记录：去掉年份，如 2026-07-19 → 07-19；可附带时间 */
+function formatHistoryDateShort(match) {
+  const raw = formatMatchWhen(match) || match?.date || match?.beijingDateKey || "";
+  if (!raw) return "";
+  // 2026-07-19 / 2026-07-19 01:00 → 07-19 / 07-19 01:00
+  return String(raw).replace(/^\d{4}-/, "");
+}
+
+function historyTeamNameWithRank(name, rank = null) {
+  const label = teamLabel(name);
+  if (rank == null) return label;
+  return `${label}<span class="history-opp-rank">第${rank}</span>`;
+}
+
 function historyMatchBodyText(match, team, rankLookup = null) {
   const resolved = resolveTeamInMatch(match, team);
   const oppInfo = getOpponentRankInfo(match, team, rankLookup);
@@ -452,11 +466,7 @@ function historyMatchBodyText(match, team, rankLookup = null) {
     oppInfo.opponent ||
     (resolved === match.home ? match.away : resolved === match.away ? match.home : match.away);
   const league = match.leagueShort || match.group || "";
-  // 对手名后附短排名，和左侧 #N 徽章形成对照
-  const oppLabel =
-    oppInfo.rank != null
-      ? `${teamLabel(opponent)}<span class="history-opp-rank">第${oppInfo.rank}</span>`
-      : teamLabel(opponent);
+  const oppLabel = historyTeamNameWithRank(opponent, oppInfo.rank);
 
   if (match.finished) {
     const score = formatHistoryScoreText(match);
@@ -476,19 +486,12 @@ function historyMatchItemHtml(match, team, rankLookup = null) {
   const result = teamResultLabel(match, team);
   const resultClass =
     result === "胜" ? "win" : result === "负" ? "loss" : result === "平" ? "draw" : "pending";
-  const when = formatMatchWhen(match);
+  const when = formatHistoryDateShort(match);
   const body = historyMatchBodyText(match, team, rankLookup);
-  const oppInfo = getOpponentRankInfo(match, team, rankLookup);
-  const leagueHint = oppInfo.league || match.leagueShort || match.group || "";
-  const rankBadge =
-    oppInfo.rank != null
-      ? `<span class="history-opp-rank-badge" title="对手排名${leagueHint ? ` · ${leagueHint}` : ""}">#${oppInfo.rank}</span>`
-      : `<span class="history-opp-rank-badge history-opp-rank-badge--empty" title="暂无对手排名">#—</span>`;
 
   return `
     <div class="history-match-item history-match-item--compact result-${resultClass}">
       <span class="standings-match-result ${resultClass}">${result}</span>
-      ${rankBadge}
       ${when ? `<span class="history-match-when">${when}</span>` : ""}
       <span class="history-match-body">${body}</span>
     </div>`;
