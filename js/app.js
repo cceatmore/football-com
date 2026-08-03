@@ -976,6 +976,205 @@ function predictionScoreCardHtml(match, outlook) {
     </div>`;
 }
 
+/** 从半场/全场拆出上半场、下半场进失球 */
+function extractHalfSplits(matches, team) {
+  const rows = [];
+  for (const m of matches || []) {
+    if (!m?.finished || m.homeScore == null || m.awayScore == null) continue;
+    if (m.homeHtScore == null || m.awayHtScore == null) continue;
+    const resolved = resolveTeamInMatch(m, team);
+    if (!resolved) continue;
+    const isHome = resolved === m.home;
+    const fhFor = Number(isHome ? m.homeHtScore : m.awayHtScore);
+    const fhAgainst = Number(isHome ? m.awayHtScore : m.homeHtScore);
+    const ftFor = Number(isHome ? m.homeScore : m.awayScore);
+    const ftAgainst = Number(isHome ? m.awayScore : m.homeScore);
+    if (![fhFor, fhAgainst, ftFor, ftAgainst].every(Number.isFinite)) continue;
+    const shFor = Math.max(0, ftFor - fhFor);
+    const shAgainst = Math.max(0, ftAgainst - fhAgainst);
+    rows.push({
+      fhFor,
+      fhAgainst,
+      shFor,
+      shAgainst,
+      scoredFh: fhFor > 0,
+      scoredSh: shFor > 0,
+      concededFh: fhAgainst > 0,
+      concededSh: shAgainst > 0,
+      zeroZeroHt: fhFor === 0 && fhAgainst === 0,
+    });
+  }
+  return rows;
+}
+
+function classifyTeamTempoStyle(rows) {
+  const n = rows.length;
+  if (n < 3) return null;
+
+  const avg = (key) => rows.reduce((s, r) => s + r[key], 0) / n;
+  const avgFhFor = avg("fhFor");
+  const avgShFor = avg("shFor");
+  const avgFhAgainst = avg("fhAgainst");
+  const avgShAgainst = avg("shAgainst");
+  const totalFor = avgFhFor + avgShFor;
+  const totalAgainst = avgFhAgainst + avgShAgainst;
+  const fhShare = totalFor > 0.05 ? avgFhFor / totalFor : 0.5;
+  const shShare = 1 - fhShare;
+  const lateBloomRate = rows.filter((r) => r.zeroZeroHt && r.scoredSh).length / n;
+  const earlyLeadRate = rows.filter((r) => r.fhFor > r.fhAgainst).length / n;
+  const fhCleanRate = rows.filter((r) => !r.concededFh).length / n;
+  const shCleanRate = rows.filter((r) => !r.concededSh).length / n;
+
+  let key = "balanced";
+  let label = "攻守相对均衡";
+  let desc = "上下半场进失球分布较均匀，没有明显的时段偏科。";
+
+  if (totalFor <= 0.95 && totalAgainst <= 1.15) {
+    key = "low-block";
+    label = "全场防守 / 小球";
+    desc = "进球与失球都偏少，倾向控场防守、节奏偏慢。";
+  } else if (avgFhFor >= avgShFor + 0.3 && avgShAgainst <= avgFhAgainst + 0.2 && fhShare >= 0.55) {
+    key = "early-attack";
+    label = "上半场进球 · 下半场收缩";
+    desc = "进球集中在上半场，下半场更偏守成，常见早进球后控节奏。";
+  } else if (avgShFor >= avgFhFor + 0.3 || shShare >= 0.58 || lateBloomRate >= 0.35) {
+    key = "late-surge";
+    label = "上半场试探 · 下半场发力";
+    desc = "上半场进球偏少，威胁更多出现在下半场，偏慢热/后程发力。";
+  } else if (avgFhFor + 0.15 < avgFhAgainst && avgShFor >= avgFhFor + 0.15 && fhCleanRate < 0.45) {
+    key = "absorb-counter";
+    label = "上半场防守 · 下半场反击";
+    desc = "上半场相对被动，下半场反击或追分意愿更强。";
+  } else if (totalFor >= 1.7 && totalAgainst >= 1.45) {
+    key = "open-game";
+    label = "全场对攻开放";
+    desc = "攻防两端都活跃，比赛容易打得开放、进球偏多。";
+  } else if (totalAgainst <= 1.0 && totalFor >= 1.15) {
+    key = "solid-attack";
+    label = "稳守推进";
+    desc = "失球控制较好，同时保持一定进球效率，攻守节奏稳健。";
+  } else if (fhShare >= 0.58) {
+    key = "early-attack";
+    label = "偏上半场进球";
+    desc = "本队进球更多出现在上半场，开局威胁更明显。";
+  } else if (shShare >= 0.58) {
+    key = "late-surge";
+    label = "偏下半场进球";
+    desc = "本队进球更多出现在下半场，后半段进攻权重更高。";
+  }
+
+  return {
+    key,
+    label,
+    desc,
+    n,
+    avgFhFor,
+    avgShFor,
+    avgFhAgainst,
+    avgShAgainst,
+    fhShare,
+    shShare,
+    lateBloomRate,
+    earlyLeadRate,
+    fhCleanRate,
+    shCleanRate,
+    totalFor,
+    totalAgainst,
+  };
+}
+
+function buildMatchTempoAnalysis(homeTeam, awayTeam, homeMatches, awayMatches) {
+  const home = classifyTeamTempoStyle(extractHalfSplits(homeMatches, homeTeam));
+  const away = classifyTeamTempoStyle(extractHalfSplits(awayMatches, awayTeam));
+  if (!home && !away) return null;
+
+  const tips = [];
+  if (home) tips.push(`${homeTeam}：${home.label}`);
+  if (away) tips.push(`${awayTeam}：${away.label}`);
+
+  let matchup = "";
+  if (home && away) {
+    if (home.key === "early-attack" && away.key === "late-surge") {
+      matchup = `${homeTeam}更可能上半场施压，${awayTeam}更可能下半场追分/发力。`;
+    } else if (home.key === "late-surge" && away.key === "early-attack") {
+      matchup = `${awayTeam}开局威胁更大，${homeTeam}需熬过上半场再图下半场反扑。`;
+    } else if (home.key === "low-block" || away.key === "low-block") {
+      matchup = "至少一方偏防守小球，全场可能节奏偏慢，注意半场小球。";
+    } else if (home.key === "open-game" && away.key === "open-game") {
+      matchup = "双方都偏开放对攻，大球与多时段进球概率上升。";
+    } else if (home.key === "early-attack" && away.key === "early-attack") {
+      matchup = "双方都偏上半场进球，开局阶段进球概率更高。";
+    } else if (home.key === "late-surge" && away.key === "late-surge") {
+      matchup = "双方都偏下半场发力，关注下半场进球与比分变化。";
+    } else if (home.key === "absorb-counter" || away.key === "absorb-counter") {
+      matchup = "存在上半场防守、下半场反击的一侧，比赛可能先抑后扬。";
+    } else {
+      matchup = "双方节奏标签不同，可结合上半场走势判断谁先掌握主动。";
+    }
+  }
+
+  return { home, away, tips, matchup };
+}
+
+function tempoStyleCardHtml(match, form) {
+  if (!form || form.pending) return "";
+  const data = form.tempoStyle;
+  if (!data?.home && !data?.away) return "";
+
+  const sideBlock = (team, style) => {
+    if (!style) {
+      return `
+        <div class="tempo-side">
+          <div class="tempo-side-name">${teamLabel(team)}</div>
+          <p class="tempo-side-empty">半场样本不足，暂无风格判断</p>
+        </div>`;
+    }
+    const fhPct = Math.round(style.fhShare * 100);
+    const shPct = Math.round(style.shShare * 100);
+    return `
+      <div class="tempo-side">
+        <div class="tempo-side-name">${teamLabel(team)}</div>
+        <div class="tempo-style-label tempo-style-label--${style.key}">${style.label}</div>
+        <p class="tempo-style-desc">${style.desc}</p>
+        <div class="tempo-stat-grid">
+          <div class="tempo-stat">
+            <span class="tempo-stat-k">上半场</span>
+            <span class="tempo-stat-v">场均进 ${style.avgFhFor.toFixed(1)} / 失 ${style.avgFhAgainst.toFixed(1)}</span>
+          </div>
+          <div class="tempo-stat">
+            <span class="tempo-stat-k">下半场</span>
+            <span class="tempo-stat-v">场均进 ${style.avgShFor.toFixed(1)} / 失 ${style.avgShAgainst.toFixed(1)}</span>
+          </div>
+          <div class="tempo-stat">
+            <span class="tempo-stat-k">进球时段</span>
+            <span class="tempo-stat-v">上半 ${fhPct}% · 下半 ${shPct}%</span>
+          </div>
+          <div class="tempo-stat">
+            <span class="tempo-stat-k">样本</span>
+            <span class="tempo-stat-v">近 ${style.n} 场含半场比分</span>
+          </div>
+        </div>
+        <div class="tempo-share-bar" aria-hidden="true">
+          <span class="tempo-share-fh" style="width:${fhPct}%"></span>
+          <span class="tempo-share-sh" style="width:${shPct}%"></span>
+        </div>
+      </div>`;
+  };
+
+  return `
+    <div class="prediction-tempo-card">
+      <div class="prediction-form-card-head">
+        <div class="prediction-source-name">比赛节奏 · 进球时段风格</div>
+        <div class="prediction-source-tag">基于近况半场/全场拆解 · 上半场 vs 下半场</div>
+      </div>
+      ${data.matchup ? `<div class="tempo-matchup">${data.matchup}</div>` : ""}
+      <div class="tempo-sides">
+        ${sideBlock(match.home, data.home)}
+        ${sideBlock(match.away, data.away)}
+      </div>
+    </div>`;
+}
+
 async function loadPredictionForm(match) {
   const local = state.allMatches || [];
   const [home, away] = await Promise.all([
@@ -992,11 +1191,15 @@ async function loadPredictionForm(match) {
   ]);
   const homeAll = (home || []).filter((m) => m.finished);
   const awayAll = (away || []).filter((m) => m.finished);
+  const homeForm = homeAll.slice(0, 10);
+  const awayForm = awayAll.slice(0, 10);
   return {
     pending: false,
-    home: homeAll.slice(0, 10),
-    away: awayAll.slice(0, 10),
+    home: homeForm,
+    away: awayForm,
     commonOpponents: buildCommonOpponentsAnalysis(match.home, match.away, homeAll, awayAll),
+    // 半场风格用近 10 场（与近况条一致），样本更贴合近期状态
+    tempoStyle: buildMatchTempoAnalysis(match.home, match.away, homeForm, awayForm),
   };
 }
 
@@ -1071,7 +1274,7 @@ async function openPredictionDetail(match) {
   showSubPage();
 
   let form = state.predictionCache.get(match.id)?.form || { pending: true, home: [], away: [] };
-  const needFormReload = !form || form.pending || !form.commonOpponents;
+  const needFormReload = !form || form.pending || !form.commonOpponents || !("tempoStyle" in form);
 
   const render = (analysis) => {
     if (els.subTitle.textContent !== "预测分析") return;
@@ -1097,6 +1300,7 @@ async function openPredictionDetail(match) {
             home: [],
             away: [],
             commonOpponents: buildCommonOpponentsAnalysis(match.home, match.away, [], []),
+            tempoStyle: null,
           };
         })
     : Promise.resolve(form);
@@ -1160,6 +1364,7 @@ function predictionDetailHtml(match, analysis) {
     ${stakesReportHtml(analysis.stakes, { pending: !!analysis.stakesPending })}
 
     ${predictionFormCardHtml(match, analysis.form)}
+    ${tempoStyleCardHtml(match, analysis.form)}
     ${commonOpponentsCardHtml(match, analysis.form)}
     ${predictionScoreCardHtml(match, scoreOutlook)}
 

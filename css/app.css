@@ -2207,6 +2207,140 @@ html, body {
   margin-bottom: 12px;
 }
 
+.prediction-tempo-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 16px;
+  margin-bottom: 12px;
+}
+
+.tempo-matchup {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.tempo-sides {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tempo-side {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tempo-side:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.tempo-side-name {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.tempo-style-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.tempo-style-label--early-attack {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.tempo-style-label--late-surge,
+.tempo-style-label--absorb-counter {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.tempo-style-label--low-block {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.tempo-style-label--open-game {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tempo-style-label--solid-attack,
+.tempo-style-label--balanced {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.tempo-style-desc {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.tempo-side-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.tempo-stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+}
+
+.tempo-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tempo-stat-k {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tempo-stat-v {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tempo-share-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.tempo-share-fh {
+  background: #ea580c;
+}
+
+.tempo-share-sh {
+  background: #7c3aed;
+}
+
 .prediction-common-card {
   background: var(--card-bg);
   border: 1px solid var(--border);
