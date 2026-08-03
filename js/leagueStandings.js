@@ -62,6 +62,8 @@ function normalizeTableRow(raw) {
     ga: parseIntField(raw.lossGoalCnt),
     gd: parseIntField(raw.netGoal),
     pts: parseIntField(raw.points),
+    uniformTeamId: raw.uniformTeamId || null,
+    sportteryTeamId: raw.sportteryTeamId || null,
   };
 }
 
@@ -121,6 +123,7 @@ export async function fetchStandingsForMatches(matches) {
         group,
         groupLabel: labelParts.join(" · "),
         mode: "league",
+        anchorMatchId: match.id,
         rows: data.rows,
       };
     })
