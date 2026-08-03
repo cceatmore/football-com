@@ -7,6 +7,9 @@ const FETCH_HEADERS = {
 const cache = new Map();
 const RECENT_MATCH_LIMIT = 10;
 const H2H_MATCH_LIMIT = 3;
+/** 共同对手分析：多拉一些场次以覆盖近 1 年 */
+const COMMON_OPPONENT_MATCH_LIMIT = 40;
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 async function fetchUniform(path) {
   const controller = new AbortController();
@@ -155,7 +158,8 @@ export function normalizeUniformHistoryMatch(raw, context = {}) {
 }
 
 export async function fetchTeamHistories(matchId, termLimits = RECENT_MATCH_LIMIT) {
-  if (cache.has(matchId)) return cache.get(matchId);
+  const cached = cache.get(matchId);
+  if (cached && (cached.termLimits || RECENT_MATCH_LIMIT) >= termLimits) return cached;
 
   const [results, h2h] = await Promise.all([
     fetchUniform(`getMatchResultV1.qry?sportteryMatchId=${matchId}&termLimits=${termLimits}`),
@@ -163,6 +167,7 @@ export async function fetchTeamHistories(matchId, termLimits = RECENT_MATCH_LIMI
   ]);
 
   const payload = {
+    termLimits,
     home: (results?.home?.matchList || []).map((m) => normalizeUniformHistoryMatch(m)),
     away: (results?.away?.matchList || []).map((m) => normalizeUniformHistoryMatch(m)),
     h2h: (h2h?.matchList || []).map((m) => normalizeUniformHistoryMatch(m)),
@@ -381,4 +386,253 @@ export function findTeamMatchMeta(match, team) {
   return null;
 }
 
-export { RECENT_MATCH_LIMIT, H2H_MATCH_LIMIT };
+function teamNormKey(name) {
+  return String(name || "")
+    .replace(/^AIK/i, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+function sidePerspective(match, team) {
+  const resolved = resolveTeamInMatch(match, team);
+  if (!resolved) return null;
+  const isHome = resolved === match.home;
+  const gf = isHome ? match.homeScore : match.awayScore;
+  const ga = isHome ? match.awayScore : match.homeScore;
+  const opponent = isHome ? match.away : match.home;
+  return {
+    resolved,
+    isHome,
+    opponent,
+    gf,
+    ga,
+    margin: gf != null && ga != null ? gf - ga : null,
+    result: teamResultLabel(match, team),
+    venue: isHome ? "主" : "客",
+  };
+}
+
+function resultRank(result) {
+  if (result === "胜") return 2;
+  if (result === "平") return 1;
+  if (result === "负") return 0;
+  return -1;
+}
+
+/** 收集近 1 年内该队对各个对手的最近一场 */
+function buildRecentOpponentMap(matches, team, { withinMs = ONE_YEAR_MS, now = Date.now() } = {}) {
+  const map = new Map();
+  for (const match of matches || []) {
+    if (!match?.finished) continue;
+    const t = matchTimeKey(match);
+    if (!t || now - t > withinMs || t > now + 2 * 86400000) continue;
+    const side = sidePerspective(match, team);
+    if (!side?.opponent) continue;
+    const key = teamNormKey(side.opponent);
+    if (!key) continue;
+    const prev = map.get(key);
+    if (!prev || t > matchTimeKey(prev.match)) {
+      map.set(key, { opponent: side.opponent, match, side });
+    }
+  }
+  return map;
+}
+
+function formatSideCommonLine(entry) {
+  if (!entry) return "近1年未交手";
+  const { match, side } = entry;
+  // 用该队视角进:失，避免客场 0:2 被误读成输球
+  const score =
+    side.gf != null && side.ga != null
+      ? `${side.gf}:${side.ga}`
+      : formatHistoryScoreText(match) || `${match.homeScore}:${match.awayScore}`;
+  const when = formatMatchWhen(match) || match.date || "";
+  return `${side.result} ${side.venue}场 ${score}${when ? `（${when}）` : ""}`;
+}
+
+/**
+ * 共同对手分析：近 1 年内 A、B 都曾交手过的 C，对比各自战绩。
+ */
+export function buildCommonOpponentsAnalysis(homeTeam, awayTeam, homeMatches, awayMatches, options = {}) {
+  const withinMs = options.withinMs ?? ONE_YEAR_MS;
+  const limit = options.limit ?? 5;
+  const now = options.now ?? Date.now();
+
+  const homeMap = buildRecentOpponentMap(homeMatches, homeTeam, { withinMs, now });
+  const awayMap = buildRecentOpponentMap(awayMatches, awayTeam, { withinMs, now });
+  const exclude = new Set([teamNormKey(homeTeam), teamNormKey(awayTeam)]);
+
+  const items = [];
+  for (const [key, homeEntry] of homeMap) {
+    if (exclude.has(key)) continue;
+    const awayEntry = awayMap.get(key);
+    if (!awayEntry) continue;
+
+    const hr = resultRank(homeEntry.side.result);
+    const ar = resultRank(awayEntry.side.result);
+    let lean = "even";
+    let note = "双方对共同对手战绩相当";
+    if (hr > ar) {
+      lean = "home";
+      note = `${homeTeam}对该对手战绩更好（${homeEntry.side.result} vs ${awayEntry.side.result}）`;
+    } else if (ar > hr) {
+      lean = "away";
+      note = `${awayTeam}对该对手战绩更好（${awayEntry.side.result} vs ${homeEntry.side.result}）`;
+    } else if (homeEntry.side.margin != null && awayEntry.side.margin != null) {
+      if (homeEntry.side.margin > awayEntry.side.margin) {
+        lean = "home";
+        note = `同为${homeEntry.side.result}，${homeTeam}净胜球更优（${homeEntry.side.margin > 0 ? "+" : ""}${homeEntry.side.margin} vs ${awayEntry.side.margin > 0 ? "+" : ""}${awayEntry.side.margin}）`;
+      } else if (awayEntry.side.margin > homeEntry.side.margin) {
+        lean = "away";
+        note = `同为${awayEntry.side.result}，${awayTeam}净胜球更优（${awayEntry.side.margin > 0 ? "+" : ""}${awayEntry.side.margin} vs ${homeEntry.side.margin > 0 ? "+" : ""}${homeEntry.side.margin}）`;
+      }
+    }
+
+    const homeScore =
+      homeEntry.side.gf != null && homeEntry.side.ga != null
+        ? `${homeEntry.side.gf}:${homeEntry.side.ga}`
+        : `${homeEntry.match.homeScore}:${homeEntry.match.awayScore}`;
+    const awayScore =
+      awayEntry.side.gf != null && awayEntry.side.ga != null
+        ? `${awayEntry.side.gf}:${awayEntry.side.ga}`
+        : `${awayEntry.match.homeScore}:${awayEntry.match.awayScore}`;
+
+    items.push({
+      opponent: homeEntry.opponent || awayEntry.opponent,
+      home: {
+        result: homeEntry.side.result,
+        venue: homeEntry.side.venue,
+        score: homeScore,
+        when: formatMatchWhen(homeEntry.match) || homeEntry.match.date || "",
+        margin: homeEntry.side.margin,
+        line: formatSideCommonLine(homeEntry),
+        match: homeEntry.match,
+      },
+      away: {
+        result: awayEntry.side.result,
+        venue: awayEntry.side.venue,
+        score: awayScore,
+        when: formatMatchWhen(awayEntry.match) || awayEntry.match.date || "",
+        margin: awayEntry.side.margin,
+        line: formatSideCommonLine(awayEntry),
+        match: awayEntry.match,
+      },
+      lean,
+      note,
+      latestMs: Math.max(matchTimeKey(homeEntry.match), matchTimeKey(awayEntry.match)),
+    });
+  }
+
+  items.sort((a, b) => b.latestMs - a.latestMs);
+  const shown = items.slice(0, limit);
+  let homeBetter = 0;
+  let awayBetter = 0;
+  let even = 0;
+  for (const it of shown) {
+    if (it.lean === "home") homeBetter += 1;
+    else if (it.lean === "away") awayBetter += 1;
+    else even += 1;
+  }
+
+  let lean = null;
+  let text = "近1年暂无共同对手样本";
+  if (shown.length) {
+    if (homeBetter > awayBetter) lean = "home";
+    else if (awayBetter > homeBetter) lean = "away";
+    else lean = "even";
+    const leanText =
+      lean === "home"
+        ? `共同对手对比更看好 ${homeTeam}`
+        : lean === "away"
+          ? `共同对手对比更看好 ${awayTeam}`
+          : "共同对手对比双方接近";
+    text = `近1年共同对手 ${shown.length} 个：${homeTeam}更优 ${homeBetter} · ${awayTeam}更优 ${awayBetter} · 相当 ${even}。${leanText}`;
+  }
+
+  return {
+    pending: false,
+    withinDays: Math.round(withinMs / 86400000),
+    total: items.length,
+    items: shown,
+    summary: {
+      homeBetter,
+      awayBetter,
+      even,
+      counted: shown.length,
+      lean,
+      text,
+    },
+  };
+}
+
+export { RECENT_MATCH_LIMIT, H2H_MATCH_LIMIT, COMMON_OPPONENT_MATCH_LIMIT };
+
+function rankMapKey(name) {
+  return String(name || "")
+    .replace(/^AIK/i, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+/** 从积分榜行 + 本地赛程构建队名→排名索引（便于近况区分对手实力） */
+export function buildTeamRankLookup(standingsRows = [], allMatches = [], leagueHint = "") {
+  const map = new Map();
+
+  const put = (team, rank, league) => {
+    if (!team || rank == null || !Number.isFinite(Number(rank))) return;
+    const key = rankMapKey(team);
+    if (!key) return;
+    if (!map.has(key)) {
+      map.set(key, { team, rank: Number(rank), league: league || "" });
+    }
+  };
+
+  for (const row of standingsRows || []) {
+    put(row.team, row.rank, leagueHint || row.groupName || "");
+  }
+
+  // 本地在售/缓存场次上的排名作补充（同名优先保留积分榜）
+  for (const m of allMatches || []) {
+    const league = m.rankLeague || m.leagueShort || m.group || "";
+    put(m.home, m.homeRank, league);
+    put(m.away, m.awayRank, league);
+  }
+
+  return map;
+}
+
+export function lookupTeamRank(rankLookup, teamName) {
+  if (!rankLookup || !teamName) return null;
+  const key = rankMapKey(teamName);
+  if (rankLookup.has(key)) return rankLookup.get(key);
+  // 宽松包含匹配（队名简称不一致时）
+  for (const [k, v] of rankLookup) {
+    if (!k) continue;
+    if (k.includes(key) || key.includes(k)) return v;
+  }
+  return null;
+}
+
+/**
+ * 取「球队视角」下对手的排名：优先场次自带 homeRank/awayRank，否则查积分榜索引。
+ */
+export function getOpponentRankInfo(match, team, rankLookup = null) {
+  const resolved = resolveTeamInMatch(match, team);
+  if (!resolved) {
+    return { opponent: null, rank: null, league: "", side: null };
+  }
+  const isHome = resolved === match.home;
+  const opponent = isHome ? match.away : match.home;
+  const embedded = isHome ? match.awayRank : match.homeRank;
+  const league = match.rankLeague || match.leagueShort || match.group || "";
+  if (embedded != null) {
+    return { opponent, rank: embedded, league, side: isHome ? "away" : "home" };
+  }
+  const hit = lookupTeamRank(rankLookup, opponent);
+  return {
+    opponent,
+    rank: hit?.rank ?? null,
+    league: hit?.league || league,
+    side: isHome ? "away" : "home",
+  };
+}

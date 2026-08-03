@@ -372,6 +372,33 @@ html, body {
   white-space: nowrap;
 }
 
+.history-opp-rank-badge {
+  flex-shrink: 0;
+  min-width: 28px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-opp-rank-badge--empty {
+  font-weight: 500;
+  color: var(--muted);
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.history-opp-rank {
+  margin-left: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
 .h2h-perspective {
   margin-left: 2px;
   font-weight: 400;
@@ -2079,6 +2106,81 @@ html, body {
   color: var(--text-secondary);
 }
 
+.prediction-stakes-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.stakes-favored {
+  text-align: center;
+  padding: 12px 10px;
+  margin: 10px 0 14px;
+  background: var(--bg);
+  border-radius: var(--radius);
+}
+
+.stakes-favored-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.stakes-favored-value {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.stakes-favored--win .stakes-favored-value { color: var(--success); }
+.stakes-favored--draw .stakes-favored-value { color: var(--warning); }
+.stakes-favored--loss .stakes-favored-value { color: var(--danger); }
+
+.stakes-scenario {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.stakes-scenario:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.stakes-scenario-result {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.stakes-scenario-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.stakes-scenario-list li {
+  margin: 3px 0;
+}
+
+.stakes-accept-list {
+  margin: 12px 0 0;
+  padding: 10px 12px 10px 28px;
+  background: var(--warning-soft);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.stakes-accept-list li {
+  margin: 4px 0;
+}
+
 .prob-bars {
   display: flex;
   flex-direction: column;
@@ -2120,6 +2222,133 @@ html, body {
   border-radius: var(--radius-lg);
   padding: 14px 16px 16px;
   margin-bottom: 12px;
+}
+
+.prediction-common-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 16px;
+  margin-bottom: 12px;
+}
+
+.common-opp-summary {
+  margin: 10px 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  background: var(--bg);
+}
+
+.common-opp-summary--win {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.common-opp-summary--loss {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.common-opp-summary--draw {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.common-opp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.common-opp-row {
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.common-opp-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.common-opp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.common-opp-name {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.common-lean {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.common-lean--home {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.common-lean--away {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.common-lean--even {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.common-opp-sides {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.common-opp-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.common-opp-team {
+  flex-shrink: 0;
+  min-width: 4.5em;
+  font-weight: 600;
+}
+
+.common-opp-line {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.common-opp-note {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.common-opp-more {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .score-outlook-banner {

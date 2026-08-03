@@ -23,6 +23,7 @@ import {
   injuryReportHtml,
   injuryBadgeText,
   webSourcesHtml,
+  stakesReportHtml,
 } from "./predictions.js";
 import {
   fetchTeamHistories,
@@ -36,8 +37,12 @@ import {
   teamResultLabel,
   formatHistoryScoreText,
   formatMatchWhen,
+  buildTeamRankLookup,
+  getOpponentRankInfo,
+  buildCommonOpponentsAnalysis,
+  COMMON_OPPONENT_MATCH_LIMIT,
 } from "./matchHistory.js";
-import { fetchStandingsForMatches, clearLeagueStandingsCache } from "./leagueStandings.js";
+import { fetchStandingsForMatches, fetchLeagueStandingsByMatch, clearLeagueStandingsCache } from "./leagueStandings.js";
 
 const state = {
   tab: "schedule",
@@ -440,34 +445,56 @@ function bindMatchCards(container, onClick) {
   });
 }
 
-function historyMatchBodyText(match, team) {
+function historyMatchBodyText(match, team, rankLookup = null) {
   const resolved = resolveTeamInMatch(match, team);
+  const oppInfo = getOpponentRankInfo(match, team, rankLookup);
   const opponent =
-    resolved === match.home ? match.away : resolved === match.away ? match.home : match.away;
+    oppInfo.opponent ||
+    (resolved === match.home ? match.away : resolved === match.away ? match.home : match.away);
   const league = match.leagueShort || match.group || "";
+  // 对手名后附短排名，和左侧 #N 徽章形成对照
+  const oppLabel =
+    oppInfo.rank != null
+      ? `${teamLabel(opponent)}<span class="history-opp-rank">第${oppInfo.rank}</span>`
+      : teamLabel(opponent);
+
   if (match.finished) {
     const score = formatHistoryScoreText(match);
-    return `${teamLabel(match.home)} ${score} ${teamLabel(match.away)}${league ? ` · ${league}` : ""}`;
+    const homeIsSelf = resolved === match.home;
+    const awayIsSelf = resolved === match.away;
+    if (!homeIsSelf && !awayIsSelf) {
+      return `${teamLabel(match.home)} ${score} ${teamLabel(match.away)}${league ? ` · ${league}` : ""}`;
+    }
+    const homePart = homeIsSelf ? teamLabel(match.home) : oppLabel;
+    const awayPart = awayIsSelf ? teamLabel(match.away) : oppLabel;
+    return `${homePart} ${score} ${awayPart}${league ? ` · ${league}` : ""}`;
   }
-  return `vs ${teamLabel(opponent)}（未赛）${league ? ` · ${league}` : ""}`;
+  return `vs ${oppLabel}（未赛）${league ? ` · ${league}` : ""}`;
 }
 
-function historyMatchItemHtml(match, team) {
+function historyMatchItemHtml(match, team, rankLookup = null) {
   const result = teamResultLabel(match, team);
   const resultClass =
     result === "胜" ? "win" : result === "负" ? "loss" : result === "平" ? "draw" : "pending";
   const when = formatMatchWhen(match);
-  const body = historyMatchBodyText(match, team);
+  const body = historyMatchBodyText(match, team, rankLookup);
+  const oppInfo = getOpponentRankInfo(match, team, rankLookup);
+  const leagueHint = oppInfo.league || match.leagueShort || match.group || "";
+  const rankBadge =
+    oppInfo.rank != null
+      ? `<span class="history-opp-rank-badge" title="对手排名${leagueHint ? ` · ${leagueHint}` : ""}">#${oppInfo.rank}</span>`
+      : `<span class="history-opp-rank-badge history-opp-rank-badge--empty" title="暂无对手排名">#—</span>`;
 
   return `
     <div class="history-match-item history-match-item--compact result-${resultClass}">
       <span class="standings-match-result ${resultClass}">${result}</span>
+      ${rankBadge}
       ${when ? `<span class="history-match-when">${when}</span>` : ""}
       <span class="history-match-body">${body}</span>
     </div>`;
 }
 
-function historyTeamBlockHtml(team, matches, metaMatch = null) {
+function historyTeamBlockHtml(team, matches, metaMatch = null, rankLookup = null) {
   const meta = teamLeagueMeta(team) || (metaMatch ? `${metaMatch.leagueShort || metaMatch.group}` : null);
   const displayMatch = findTeamMatchMeta(metaMatch, team) || matches[0] || metaMatch;
 
@@ -477,12 +504,12 @@ function historyTeamBlockHtml(team, matches, metaMatch = null) {
         ${flagHtml(team, 28, displayMatch)}
         <div class="history-team-info">
           <div class="history-team-name">${teamLabel(team)}</div>
-          <div class="history-team-meta">${meta || "近期战绩"} · 最近 ${matches.length} 场</div>
+          <div class="history-team-meta">${meta || "近期战绩"} · 最近 ${matches.length} 场 · 含对手排名</div>
         </div>
       </div>
       ${
         matches.length
-          ? `<div class="history-matches-list">${matches.map((m) => historyMatchItemHtml(m, team)).join("")}</div>`
+          ? `<div class="history-matches-list">${matches.map((m) => historyMatchItemHtml(m, team, rankLookup)).join("")}</div>`
           : '<p class="history-empty">暂无比赛记录</p>'
       }
     </div>`;
@@ -541,10 +568,18 @@ async function openMatchDetail(match) {
   try {
     const localHome = getTeamMatches(state.allMatches, match.home).filter((m) => m.id !== match.id);
     const localAway = getTeamMatches(state.allMatches, match.away).filter((m) => m.id !== match.id);
-    const histories = await fetchTeamHistories(match.id);
+    const [histories, standings] = await Promise.all([
+      fetchTeamHistories(match.id),
+      fetchLeagueStandingsByMatch(match.id).catch(() => null),
+    ]);
     const homeMatches = getTeamHistoryList(histories, "home", localHome, match.home, match.id);
     const awayMatches = getTeamHistoryList(histories, "away", localAway, match.away, match.id);
     const h2hMatches = getH2hList(histories);
+    const rankLookup = buildTeamRankLookup(
+      standings?.rows || [],
+      state.allMatches,
+      standings?.leagueName || match.leagueShort || match.group || ""
+    );
 
     els.subContent.innerHTML = `
       <div class="detail-card">
@@ -556,8 +591,8 @@ async function openMatchDetail(match) {
         ${match.homeRank != null || match.awayRank != null ? `<div class="detail-row"><span class="label">联赛排名</span><span class="value">${teamLabel(match.home)} ${formatRank(match.homeRank, match.rankLeague) || "—"} · ${teamLabel(match.away)} ${formatRank(match.awayRank, match.rankLeague) || "—"}</span></div>` : ""}
         ${h2hBlockHtml(h2hMatches, match.home)}
       </div>
-      ${historyTeamBlockHtml(match.home, homeMatches, match)}
-      ${historyTeamBlockHtml(match.away, awayMatches, match)}
+      ${historyTeamBlockHtml(match.home, homeMatches, match, rankLookup)}
+      ${historyTeamBlockHtml(match.away, awayMatches, match, rankLookup)}
     `;
     scheduleTeamNameMarquee(els.subContent);
   } catch (err) {
@@ -571,13 +606,14 @@ async function openMatchDetail(match) {
       .slice()
       .sort((a, b) => String(b.date).localeCompare(String(a.date)))
       .slice(0, 10);
+    const rankLookup = buildTeamRankLookup([], state.allMatches, match.leagueShort || match.group || "");
     els.subContent.innerHTML = `
       <div class="detail-card">
         <h3>⚽ ${match.league || match.group}${match.num ? ` · ${match.num}` : ""}</h3>
         ${matchCardHtml(match, { static: true, hideMeta: true, hideRound: true })}
       </div>
-      ${historyTeamBlockHtml(match.home, localHome, match)}
-      ${historyTeamBlockHtml(match.away, localAway, match)}
+      ${historyTeamBlockHtml(match.home, localHome, match, rankLookup)}
+      ${historyTeamBlockHtml(match.away, localAway, match, rankLookup)}
       <p class="detail-note">远程战绩加载失败，已显示本地缓存数据。</p>
     `;
     console.error(err);
@@ -686,7 +722,7 @@ async function renderStandings() {
 function renderPredictions() {
   const matches = sortMatchesByTime(state.matches.filter((m) => !m.finished));
   els.main.innerHTML = [
-    `<p class="predictions-intro">打开场次后自动检索 Forebet / PredictZ / Tips.GG 等机构与网红预测，并附带伤停位置统计。</p>`,
+    `<p class="predictions-intro">打开场次后先给出市场倾向与赛果影响（晋级/保级等），再补充 Forebet / PredictZ 等机构摘要与伤停。</p>`,
     matches.length
       ? matches.map((m) => predictionCardHtml(m)).join("")
       : `<div class="empty-state"><div class="icon">🔮</div><p>当前暂无待预测场次</p></div>`,
@@ -702,9 +738,10 @@ function predictionCardHtml(m) {
   const cached = state.predictionCache.get(m.id);
   const pick = cached?.consensus?.pick || cached?.summary?.pick;
   const injuryNote = injuryBadgeText(cached?.injury);
+  const fromOdds = cached?.sources?.length && cached.sources.every((s) => s.local);
   const badge = pick
-    ? `<span class="prediction-badge prediction-badge--${outcomeClass(pick.key)}">机构倾向 ${pick.short}${pick.prob != null ? ` ${Math.round(pick.prob * 100)}%` : ""}</span>`
-    : `<span class="prediction-badge prediction-badge--pending">检索预测</span>`;
+    ? `<span class="prediction-badge prediction-badge--${outcomeClass(pick.key)}">${fromOdds ? "市场倾向" : "倾向"} ${pick.short}${pick.prob != null ? ` ${Math.round(pick.prob * 100)}%` : ""}</span>`
+    : `<span class="prediction-badge prediction-badge--pending">查看分析</span>`;
   const injuryBadge = injuryNote
     ? `<span class="prediction-badge prediction-badge--injury">${injuryNote}</span>`
     : "";
@@ -939,24 +976,99 @@ function predictionScoreCardHtml(match, outlook) {
 async function loadPredictionForm(match) {
   const local = state.allMatches || [];
   const [home, away] = await Promise.all([
-    fetchTeamRecentForm(match.home, { matchId: match.id, localMatches: local }),
-    fetchTeamRecentForm(match.away, { matchId: match.id, localMatches: local }),
+    fetchTeamRecentForm(match.home, {
+      matchId: match.id,
+      localMatches: local,
+      limit: COMMON_OPPONENT_MATCH_LIMIT,
+    }),
+    fetchTeamRecentForm(match.away, {
+      matchId: match.id,
+      localMatches: local,
+      limit: COMMON_OPPONENT_MATCH_LIMIT,
+    }),
   ]);
+  const homeAll = (home || []).filter((m) => m.finished);
+  const awayAll = (away || []).filter((m) => m.finished);
   return {
     pending: false,
-    home: (home || []).filter((m) => m.finished).slice(0, 10),
-    away: (away || []).filter((m) => m.finished).slice(0, 10),
+    home: homeAll.slice(0, 10),
+    away: awayAll.slice(0, 10),
+    commonOpponents: buildCommonOpponentsAnalysis(match.home, match.away, homeAll, awayAll),
   };
+}
+
+function commonOpponentsCardHtml(match, form) {
+  const pending = !form || form.pending;
+  const data = form?.commonOpponents;
+  // 加载中或无共同对手时不占位显示
+  if (pending || !data?.items?.length) return "";
+
+  const items = data.items;
+  const summary = data.summary;
+
+  const leanClass =
+    summary?.lean === "home" ? "win" : summary?.lean === "away" ? "loss" : "draw";
+  const rows = items
+    .map((it) => {
+      const homeCls =
+        it.home.result === "胜" ? "win" : it.home.result === "负" ? "loss" : "draw";
+      const awayCls =
+        it.away.result === "胜" ? "win" : it.away.result === "负" ? "loss" : "draw";
+      const leanTag =
+        it.lean === "home"
+          ? `<span class="common-lean common-lean--home">${teamLabel(match.home)}更优</span>`
+          : it.lean === "away"
+            ? `<span class="common-lean common-lean--away">${teamLabel(match.away)}更优</span>`
+            : `<span class="common-lean common-lean--even">相当</span>`;
+      return `
+        <div class="common-opp-row">
+          <div class="common-opp-head">
+            <span class="common-opp-name">共同对手：${teamLabel(it.opponent)}</span>
+            ${leanTag}
+          </div>
+          <div class="common-opp-sides">
+            <div class="common-opp-side">
+              <span class="common-opp-team">${teamLabel(match.home)}</span>
+              <span class="standings-match-result ${homeCls}">${it.home.result}</span>
+              <span class="common-opp-line">${it.home.venue}场 ${it.home.score}${it.home.when ? ` · ${it.home.when}` : ""}</span>
+            </div>
+            <div class="common-opp-side">
+              <span class="common-opp-team">${teamLabel(match.away)}</span>
+              <span class="standings-match-result ${awayCls}">${it.away.result}</span>
+              <span class="common-opp-line">${it.away.venue}场 ${it.away.score}${it.away.when ? ` · ${it.away.when}` : ""}</span>
+            </div>
+          </div>
+          <div class="common-opp-note">${it.note}</div>
+        </div>`;
+    })
+    .join("");
+
+  const moreNote =
+    data.total > items.length
+      ? `<p class="common-opp-more">另有 ${data.total - items.length} 个共同对手未展开</p>`
+      : "";
+
+  return `
+    <div class="prediction-common-card">
+      <div class="prediction-form-card-head">
+        <div class="prediction-source-name">共同对手对比</div>
+        <div class="prediction-source-tag">近 1 年 · 双方都交过手的同一对手</div>
+      </div>
+      <div class="common-opp-summary common-opp-summary--${leanClass}">${summary?.text || ""}</div>
+      <div class="common-opp-list">${rows}</div>
+      ${moreNote}
+    </div>`;
 }
 
 async function openPredictionDetail(match) {
   els.subTitle.textContent = "预测分析";
   els.subContent.innerHTML = `
-    <div class="loading"><div class="spinner"></div><span>正在检索机构预测…</span></div>
+    <div class="loading"><div class="spinner"></div><span>正在生成倾向与赛果影响…</span></div>
   `;
   showSubPage();
 
   let form = state.predictionCache.get(match.id)?.form || { pending: true, home: [], away: [] };
+  const needFormReload = !form || form.pending || !form.commonOpponents;
 
   const render = (analysis) => {
     if (els.subTitle.textContent !== "预测分析") return;
@@ -965,7 +1077,7 @@ async function openPredictionDetail(match) {
     scheduleTeamNameMarquee(els.subContent);
   };
 
-  const formPromise = form.pending
+  const formPromise = needFormReload
     ? loadPredictionForm(match)
         .then((data) => {
           form = data;
@@ -977,7 +1089,12 @@ async function openPredictionDetail(match) {
           }
         })
         .catch(() => {
-          form = { pending: false, home: [], away: [] };
+          form = {
+            pending: false,
+            home: [],
+            away: [],
+            commonOpponents: buildCommonOpponentsAnalysis(match.home, match.away, [], []),
+          };
         })
     : Promise.resolve(form);
 
@@ -1012,6 +1129,8 @@ function predictionDetailHtml(match, analysis) {
   const consensus = analysis.consensus || analysis.summary || {};
   const pick = consensus.pick;
   const scoreOutlook = buildScoreOutlook(match, analysis.form, consensus.goals);
+  const onlyOdds = (analysis.sources || []).length > 0 && (analysis.sources || []).every((s) => s.local);
+  const verdictLabel = onlyOdds ? "市场赔率倾向" : "综合倾向";
 
   return `
     <div class="detail-card prediction-summary-card">
@@ -1020,7 +1139,7 @@ function predictionDetailHtml(match, analysis) {
       ${
         pick
           ? `<div class="prediction-verdict">
-              <div class="prediction-verdict-label">机构多数倾向</div>
+              <div class="prediction-verdict-label">${verdictLabel}</div>
               <div class="prediction-verdict-value prediction-verdict-value--${outcomeClass(pick.key)}">${pick.label}</div>
               <div class="prediction-verdict-meta">${consensus.tagline || consensus.confidence || "全网聚合"}</div>
             </div>
@@ -1030,11 +1149,15 @@ function predictionDetailHtml(match, analysis) {
                 ? `<ul class="prediction-bullets">${consensus.bullets.map((b) => `<li>${b}</li>`).join("")}</ul>`
                 : ""
             }`
-          : `<p class="prediction-empty-note">未形成明确多数倾向，请查看下方各机构摘要。</p>`
+          : `<p class="prediction-empty-note">未形成明确倾向，请查看下方赛果影响与各家摘要。</p>`
       }
     </div>
 
+    <div class="prediction-section-title">赛果影响 · 谁更能接受平局</div>
+    ${stakesReportHtml(analysis.stakes, { pending: !!analysis.stakesPending })}
+
     ${predictionFormCardHtml(match, analysis.form)}
+    ${commonOpponentsCardHtml(match, analysis.form)}
     ${predictionScoreCardHtml(match, scoreOutlook)}
 
     <div class="prediction-section-title">各家观点摘要</div>
@@ -1042,7 +1165,7 @@ function predictionDetailHtml(match, analysis) {
 
     ${injuryReportHtml(analysis.injury, match, { pending: !!analysis.injuryPending })}
 
-    <p class="predictions-disclaimer">预测为公开网页检索后的机构观点摘要；大比分结合近况进球与机构大球观点估算，仅供参考。</p>
+    <p class="predictions-disclaimer">倾向综合市场赔率与公开机构摘要；赛果影响依据积分榜/杯赛属性启发式推算，仅供参考，不构成投注建议。</p>
   `;
 }
 

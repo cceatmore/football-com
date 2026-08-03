@@ -1,3 +1,5 @@
+import { fetchLeagueStandingsByMatch } from "./leagueStandings.js";
+
 const UNIFORM_BASE = "https://webapi.sporttery.cn/gateway/uniform/football";
 const FETCH_HEADERS = {
   Referer: "https://m.sporttery.cn/mjc/zqszsc/",
@@ -66,6 +68,67 @@ const LEAGUE_IAS_SLUGS = {
   法甲: "france-ligue-1",
 };
 
+/** 联赛 → 预测站栏目直链（绕过搜索引擎，显著更快） */
+const LEAGUE_TIP_PAGES = {
+  瑞超: [
+    "https://www.predictz.com/predictions/sweden/allsvenskan/",
+    "https://www.forebet.com/en/football/predictions/sweden/allsvenskan",
+    "https://www.windrawwin.com/football-predictions/sweden-allsvenskan/",
+  ],
+  挪超: [
+    "https://www.predictz.com/predictions/norway/eliteserien/",
+    "https://www.forebet.com/en/football/predictions/norway/eliteserien",
+    "https://www.windrawwin.com/football-predictions/norway-eliteserien/",
+  ],
+  芬超: [
+    "https://www.predictz.com/predictions/finland/veikkausliiga/",
+    "https://www.forebet.com/en/football/predictions/finland/veikkausliiga",
+  ],
+  巴甲: [
+    "https://www.predictz.com/predictions/brazil/serie-a/",
+    "https://www.forebet.com/en/football/predictions/brazil/serie-a",
+    "https://www.windrawwin.com/football-predictions/brazil-serie-a/",
+  ],
+  巴西杯: [
+    "https://www.predictz.com/predictions/brazil/copa-do-brasil/",
+    "https://www.forebet.com/en/football/predictions/brazil/copa-do-brasil",
+  ],
+  英超: [
+    "https://www.predictz.com/predictions/england/premier-league/",
+    "https://www.forebet.com/en/football/predictions/england/premier-league",
+    "https://www.windrawwin.com/football-predictions/england-premier-league/",
+  ],
+  西甲: [
+    "https://www.predictz.com/predictions/spain/la-liga/",
+    "https://www.forebet.com/en/football/predictions/spain/la-liga",
+  ],
+  德甲: [
+    "https://www.predictz.com/predictions/germany/bundesliga/",
+    "https://www.forebet.com/en/football/predictions/germany/bundesliga",
+  ],
+  意甲: [
+    "https://www.predictz.com/predictions/italy/serie-a/",
+    "https://www.forebet.com/en/football/predictions/italy/serie-a",
+  ],
+  法甲: [
+    "https://www.predictz.com/predictions/france/ligue-1/",
+    "https://www.forebet.com/en/football/predictions/france/ligue-1",
+  ],
+};
+
+/** 联赛升降级 / 欧战区启发式（用于赛果影响文案） */
+const LEAGUE_STAKE_RULES = {
+  英超: { teams: 20, champion: 1, europeTop: 4, europeLabel: "欧冠区", midEurope: [5, 6], midLabel: "欧战区", relegateFrom: 18 },
+  西甲: { teams: 20, champion: 1, europeTop: 4, europeLabel: "欧冠区", midEurope: [5, 6], midLabel: "欧战区", relegateFrom: 18 },
+  德甲: { teams: 18, champion: 1, europeTop: 4, europeLabel: "欧冠区", midEurope: [5, 6], midLabel: "欧战区", relegateFrom: 16, playoffRank: 16 },
+  意甲: { teams: 20, champion: 1, europeTop: 4, europeLabel: "欧冠区", midEurope: [5, 6], midLabel: "欧战区", relegateFrom: 18 },
+  法甲: { teams: 18, champion: 1, europeTop: 3, europeLabel: "欧冠区", midEurope: [4, 5], midLabel: "欧战区", relegateFrom: 16, playoffRank: 16 },
+  瑞超: { teams: 16, champion: 1, europeTop: 3, europeLabel: "欧战区", relegateFrom: 14, playoffRank: 14 },
+  挪超: { teams: 16, champion: 1, europeTop: 3, europeLabel: "欧战区", relegateFrom: 14, playoffRank: 14 },
+  芬超: { teams: 12, champion: 1, europeTop: 2, europeLabel: "欧战区", relegateFrom: 11 },
+  巴甲: { teams: 20, champion: 1, europeTop: 4, europeLabel: "解放者杯区", midEurope: [5, 6], midLabel: "南美杯区", relegateFrom: 17 },
+};
+
 const TRUSTED_HOSTS = [
   "predictz.com",
   "forebet.com",
@@ -94,7 +157,7 @@ const PRIORITY_TIP_SITES = [
 
 const cache = new Map();
 /** 预测结果结构版本；变更后自动丢弃旧缓存（避免串场摘要残留） */
-export const ANALYSIS_SCHEMA = 9;
+export const ANALYSIS_SCHEMA = 10;
 
 /** 赔率/资讯站，不做预测摘要 */
 const BLOCKED_HOSTS = [
@@ -262,6 +325,241 @@ function pickOutcome(probs) {
 
 function pct(n) {
   return `${Math.round(n * 100)}%`;
+}
+
+/** 体彩胜平负赔率 → 去水后隐含概率 */
+function oddsToImpliedProbs(odds) {
+  if (!odds?.h || !odds?.d || !odds?.a) return null;
+  const ih = 1 / Number(odds.h);
+  const id = 1 / Number(odds.d);
+  const ia = 1 / Number(odds.a);
+  if (![ih, id, ia].every((n) => Number.isFinite(n) && n > 0)) return null;
+  const sum = ih + id + ia;
+  return { home: ih / sum, draw: id / sum, away: ia / sum };
+}
+
+function buildOddsSource(match) {
+  const probs = oddsToImpliedProbs(match?.odds);
+  if (!probs) return null;
+  const pick = pickOutcome(probs);
+  const line = match.hhad?.line;
+  const extras = [];
+  if (line) extras.push(`让球 ${line}`);
+  const tipText = formatChineseTip(pick.key, probs, extras);
+  const favoredTeam = pick.key === "home" ? match.home : pick.key === "away" ? match.away : null;
+  const leanNote = favoredTeam
+    ? `市场更看好${favoredTeam}（隐含概率约 ${pct(pick.prob)}）`
+    : `市场倾向平局（隐含概率约 ${pct(pick.prob)}）`;
+  return {
+    name: "体彩市场赔率",
+    url: "",
+    title: `${match.home}对阵${match.away} · 赔率隐含倾向`,
+    tipText: `${leanNote}。${tipText}`,
+    pick: { ...pick },
+    probs,
+    goals: null,
+    trusted: true,
+    local: true,
+    sourceKind: "odds",
+  };
+}
+
+function isCupCompetition(match) {
+  const hay = `${match?.league || ""} ${match?.leagueShort || ""} ${match?.group || ""} ${match?.groupLabel || ""}`;
+  return /杯|cup|knockout|淘汰|决赛|半决赛|四分之一|附加赛|play.?offs?|copa\b/i.test(hay);
+}
+
+function findStandingRow(rows, teamName) {
+  if (!rows?.length || !teamName) return null;
+  const exact = rows.find((r) => r.team === teamName);
+  if (exact) return exact;
+  const names = teamSearchNames(teamName).map((n) => foldAscii(n));
+  return (
+    rows.find((r) => {
+      const t = foldAscii(r.team);
+      return names.some((n) => n && (t === n || t.includes(n) || n.includes(t)));
+    }) || null
+  );
+}
+
+function zoneLabelForRank(rank, rules) {
+  if (!rank || !rules) return "中游";
+  if (rank === 1) return "争冠区";
+  if (rank <= (rules.europeTop || 0)) return rules.europeLabel || "欧战区";
+  if (rules.midEurope?.length) {
+    const [lo, hi] = [Math.min(...rules.midEurope), Math.max(...rules.midEurope)];
+    if (rank >= lo && rank <= hi) return rules.midLabel || "欧战区";
+  }
+  if (rules.playoffRank && rank === rules.playoffRank) return "降级附加赛区";
+  if (rules.relegateFrom && rank >= rules.relegateFrom) return "降级区";
+  return "中游";
+}
+
+function describeLeagueOutcome(team, sideLabel, result, row, rivalRow, rules, isCup) {
+  if (isCup) {
+    if (result === "win") return `${team}（${sideLabel}）赢球：晋级下一轮 / 锁定出线优势`;
+    if (result === "lose") return `${team}（${sideLabel}）输球：面临被淘汰风险`;
+    return `${team}（${sideLabel}）平局：可能进入加时/点球，或把悬念留到次回合`;
+  }
+
+  const rank = row?.rank;
+  const zone = zoneLabelForRank(rank, rules);
+  const pts = row?.pts;
+  const gap = rivalRow?.pts != null && pts != null ? pts - rivalRow.pts : null;
+
+  if (result === "win") {
+    if (zone === "争冠区" || zone === (rules?.europeLabel || "欧战区") || (rank && rank <= 4)) {
+      return `${team}赢球：巩固${zone === "中游" ? "上游排名" : zone}，争冠/欧战席位更稳`;
+    }
+    if (zone === "降级区" || zone === "降级附加赛区") {
+      return `${team}赢球：拿到 3 分，有望跳出${zone}、缓解保级压力`;
+    }
+    return `${team}赢球：积 3 分，有望提升排名${rank ? `（当前第 ${rank}）` : ""}`;
+  }
+
+  if (result === "lose") {
+    if (zone === "降级区" || zone === "降级附加赛区") {
+      return `${team}输球：积 0 分，更深陷入降级/附加赛危机`;
+    }
+    if (zone === "争冠区" || (rank && rank <= 3)) {
+      return `${team}输球：争冠节奏受挫，可能被身后球队追近`;
+    }
+    if (rules?.relegateFrom && rank != null && rank >= rules.relegateFrom - 3) {
+      return `${team}输球：与保级线距离被拉近，需警惕滑向降级区`;
+    }
+    return `${team}输球：积 0 分${rank ? `，排名（第 ${rank}）可能下滑` : ""}`;
+  }
+
+  // draw
+  if (zone === "降级区" || zone === "降级附加赛区") {
+    return `${team}平局：拿到 1 分，对保级仍有帮助（可接受）`;
+  }
+  if (zone === "争冠区" || (rank && rank === 1)) {
+    const note = gap != null && gap > 0 ? `仍领先身后 ${gap} 分` : "可能被追近";
+    return `${team}平局：拿到 1 分，争冠不至于崩盘（${note}）`;
+  }
+  if (rules?.relegateFrom && rank != null && rank >= rules.relegateFrom - 2) {
+    return `${team}平局：拿到 1 分，有助于稳住保级形势（可接受）`;
+  }
+  return `${team}平局：双方各得 1 分，排名变动通常有限`;
+}
+
+function teamAcceptsDraw(row, rules, isCup, probs, sideKey) {
+  if (isCup) {
+    return {
+      accept: true,
+      note: "杯赛平局常不意味着出局，可能加时/点球或次回合再决胜",
+    };
+  }
+  const zone = zoneLabelForRank(row?.rank, rules);
+  if (zone === "降级区" || zone === "降级附加赛区") {
+    return { accept: true, note: "保级阶段拿 1 分往往可接受，总比输球强" };
+  }
+  if (rules?.relegateFrom && row?.rank != null && row.rank >= rules.relegateFrom - 2) {
+    return { accept: true, note: "靠近保级线时，平局有助于拉开与降级区的距离" };
+  }
+  if (row?.rank === 1 && probs?.draw >= 0.22) {
+    return { accept: true, note: "榜首球队客场/硬仗拿 1 分通常可接受" };
+  }
+  // 市场上平局概率接近首选时，提示双方都能接受平
+  if (probs?.draw != null && probs.draw >= 0.28 && sideKey !== "draw") {
+    return { accept: true, note: "本场平局概率不低，对该队也是可接受结果" };
+  }
+  return { accept: false, note: "" };
+}
+
+/**
+ * 赛果影响：哪边更被看好、赢/平/输意味着什么、谁更能接受平局
+ */
+function buildMatchStakes(match, standingRows = null) {
+  const leagueKey = match.leagueShort || match.group || "";
+  const rules = LEAGUE_STAKE_RULES[leagueKey] || null;
+  const isCup = isCupCompetition(match);
+  const probs = oddsToImpliedProbs(match.odds);
+  const pick = probs ? pickOutcome(probs) : null;
+
+  const homeRow =
+    findStandingRow(standingRows, match.home) ||
+    (match.homeRank != null ? { team: match.home, rank: match.homeRank, pts: null } : null);
+  const awayRow =
+    findStandingRow(standingRows, match.away) ||
+    (match.awayRank != null ? { team: match.away, rank: match.awayRank, pts: null } : null);
+
+  const favoredTeam =
+    pick?.key === "home" ? match.home : pick?.key === "away" ? match.away : pick?.key === "draw" ? null : null;
+  const favoredLabel = pick
+    ? pick.key === "draw"
+      ? "双方实力接近，平局概率突出"
+      : `更看好 ${favoredTeam}（${pick.label}约 ${pct(pick.prob)}）`
+    : match.homeRank != null && match.awayRank != null
+      ? match.homeRank < match.awayRank
+        ? `排名更看好主队 ${match.home}（第 ${match.homeRank} vs 第 ${match.awayRank}）`
+        : match.awayRank < match.homeRank
+          ? `排名更看好客队 ${match.away}（第 ${match.awayRank} vs 第 ${match.homeRank}）`
+          : "双方排名接近"
+      : "暂无明确市场倾向";
+
+  const homeWin = describeLeagueOutcome(match.home, "主", "win", homeRow, awayRow, rules, isCup);
+  const homeDraw = describeLeagueOutcome(match.home, "主", "draw", homeRow, awayRow, rules, isCup);
+  const homeLose = describeLeagueOutcome(match.home, "主", "lose", homeRow, awayRow, rules, isCup);
+  const awayWin = describeLeagueOutcome(match.away, "客", "win", awayRow, homeRow, rules, isCup);
+  const awayDraw = describeLeagueOutcome(match.away, "客", "draw", awayRow, homeRow, rules, isCup);
+  const awayLose = describeLeagueOutcome(match.away, "客", "lose", awayRow, homeRow, rules, isCup);
+
+  const homeAccept = teamAcceptsDraw(homeRow, rules, isCup, probs, "home");
+  const awayAccept = teamAcceptsDraw(awayRow, rules, isCup, probs, "away");
+
+  const bullets = [favoredLabel];
+  if (isCup) {
+    bullets.push("杯赛属性：赢球偏晋级，输球偏淘汰，平局未必出局");
+  } else if (homeRow?.rank || awayRow?.rank) {
+    const hz = zoneLabelForRank(homeRow?.rank, rules);
+    const az = zoneLabelForRank(awayRow?.rank, rules);
+    bullets.push(
+      `积分形势：${match.home} 第 ${homeRow?.rank ?? "?"}（${hz}）· ${match.away} 第 ${awayRow?.rank ?? "?"}（${az}）`
+    );
+  }
+  if (homeAccept.accept) bullets.push(`${match.home}：${homeAccept.note}`);
+  if (awayAccept.accept) bullets.push(`${match.away}：${awayAccept.note}`);
+
+  return {
+    isCup,
+    favored: pick
+      ? {
+          key: pick.key,
+          label: pick.label,
+          team: favoredTeam,
+          prob: pick.prob,
+          text: favoredLabel,
+        }
+      : null,
+    home: {
+      team: match.home,
+      rank: homeRow?.rank ?? null,
+      zone: zoneLabelForRank(homeRow?.rank, rules),
+      win: homeWin,
+      draw: homeDraw,
+      lose: homeLose,
+      acceptDraw: homeAccept.accept,
+      acceptDrawNote: homeAccept.note,
+    },
+    away: {
+      team: match.away,
+      rank: awayRow?.rank ?? null,
+      zone: zoneLabelForRank(awayRow?.rank, rules),
+      win: awayWin,
+      draw: awayDraw,
+      lose: awayLose,
+      acceptDraw: awayAccept.accept,
+      acceptDrawNote: awayAccept.note,
+    },
+    bullets,
+    scenarios: [
+      { result: "主胜", home: homeWin, away: awayLose },
+      { result: "平局", home: homeDraw, away: awayDraw },
+      { result: "主负", home: homeLose, away: awayWin },
+    ],
+  };
 }
 
 function normalizePosition(pos) {
@@ -867,39 +1165,78 @@ function extractTipSnippet(text, homeNames, awayNames) {
   return named || "";
 }
 
+/** 从预测站联赛列表页直接抠出本场链接（比搜引擎快且稳） */
+function extractMatchLinksFromTipPage(markdown, homeNames, awayNames) {
+  if (!markdown) return [];
+  const items = [];
+  const re = /\[([^\]]{4,120})\]\((https?:\/\/[^)]+)\)/g;
+  let m;
+  while ((m = re.exec(markdown))) {
+    const title = m[1].replace(/\*\*/g, "").trim();
+    const url = m[2].split(/[?\s]/)[0];
+    if (!url || isBlockedHost(url) || isGenericListingUrl(url)) continue;
+    if (!isTrustedHost(url) && !PRIORITY_TIP_SITES.some((h) => hostOf(url).includes(h))) continue;
+    const hay = `${title} ${url}`;
+    if (teamHitCount(hay, homeNames, awayNames) < 2) continue;
+    // 截一段附近文本当 snippet
+    const around = markdown.slice(Math.max(0, m.index - 40), Math.min(markdown.length, m.index + 420));
+    items.push({
+      title,
+      url,
+      snippet: around.replace(/\s+/g, " ").trim().slice(0, 240),
+    });
+  }
+  return items;
+}
+
+async function fetchDirectTipCandidates(match) {
+  const homeNames = teamSearchNames(match.home);
+  const awayNames = teamSearchNames(match.away);
+  const leagueKey = match.leagueShort || match.group || "";
+  const pages = LEAGUE_TIP_PAGES[leagueKey] || [];
+  if (!pages.length) return [];
+
+  const bodies = await Promise.all(pages.slice(0, 3).map((u) => fetchViaJina(u, 5500)));
+  const dedup = new Map();
+  for (const md of bodies) {
+    for (const item of extractMatchLinksFromTipPage(md, homeNames, awayNames)) {
+      const key = item.url.replace(/\/$/, "").toLowerCase();
+      if (!dedup.has(key)) dedup.set(key, item);
+    }
+  }
+  return [...dedup.values()]
+    .map((item) => ({ ...item, score: scoreResult(item, homeNames, awayNames) }))
+    .filter((item) => item.score >= 10)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+}
+
 async function searchWebTips(match) {
   const homeNames = teamSearchNames(match.home);
   const awayNames = teamSearchNames(match.away);
   const homeEn = bestEnglishName(homeNames);
   const awayEn = bestEnglishName(awayNames);
+  if (!homeEn || !awayEn) return [];
 
-  // 只跑 3 路并行搜索（原先串行 8~10 次是 3 分钟主因）
-  const queries = [
-    `site:predictz.com OR site:betimate.com OR site:betclan.com ${homeEn} ${awayEn}`,
-    `site:forebet.com OR site:windrawwin.com ${homeEn} ${awayEn} prediction`,
-    `${homeEn} vs ${awayEn} prediction tip`,
-  ];
-
-  const pages = await Promise.all(
-    queries.map((q) =>
-      fetchViaJina(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, 6500)
-    )
+  // 仅 1 路兜底搜索（直链失败时才用）
+  const q = `site:predictz.com OR site:forebet.com OR site:windrawwin.com ${homeEn} ${awayEn} prediction`;
+  const md = await fetchViaJina(
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+    5000
   );
 
   const dedup = new Map();
-  for (const md of pages) {
-    for (const item of extractSearchResults(md)) {
-      if (isBlockedResult(item)) continue;
-      const key = item.url.replace(/\/$/, "").toLowerCase();
-      if (!dedup.has(key)) dedup.set(key, item);
-    }
+  for (const item of extractSearchResults(md)) {
+    if (isBlockedResult(item)) continue;
+    const key = item.url.replace(/\/$/, "").toLowerCase();
+    if (!dedup.has(key)) dedup.set(key, item);
   }
 
   return [...dedup.values()]
     .map((item) => ({ ...item, score: scoreResult(item, homeNames, awayNames) }))
     .filter((item) => item.score >= 10)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 6);
+    .slice(0, 4);
 }
 
 function buildTipFromCorpus(corpus, homeNames, awayNames, match, url, rawTitle) {
@@ -947,7 +1284,7 @@ async function enrichTipPage(item, homeNames, awayNames, match) {
     return quick;
   }
 
-  const page = await fetchViaJina(item.url, 7000);
+  const page = await fetchViaJina(item.url, 5500);
   return buildTipFromCorpus(`${head}\n${page || ""}`, homeNames, awayNames, match, item.url, rawTitle);
 }
 
@@ -1004,10 +1341,18 @@ function buildGoalsConsensus(sources) {
 function buildConsensus(sources) {
   const votes = { home: 0, draw: 0, away: 0 };
   let counted = 0;
+  let probSum = { home: 0, draw: 0, away: 0 };
+  let probN = 0;
   for (const s of sources) {
     if (!s.pick?.key) continue;
     votes[s.pick.key] += 1;
     counted += 1;
+    if (s.probs) {
+      probSum.home += s.probs.home;
+      probSum.draw += s.probs.draw;
+      probSum.away += s.probs.away;
+      probN += 1;
+    }
   }
   const goals = buildGoalsConsensus(sources);
 
@@ -1023,15 +1368,26 @@ function buildConsensus(sources) {
     };
   }
 
-  const probs = {
-    home: votes.home / counted,
-    draw: votes.draw / counted,
-    away: votes.away / counted,
-  };
+  // 有真实概率则取平均；否则退回投票占比
+  const probs = probN
+    ? {
+        home: probSum.home / probN,
+        draw: probSum.draw / probN,
+        away: probSum.away / probN,
+      }
+    : {
+        home: votes.home / counted,
+        draw: votes.draw / counted,
+        away: votes.away / counted,
+      };
   const pick = pickOutcome(probs);
   const bullets = [
-    `多数倾向：${pick.label}（${votes[pick.key]}/${counted} 家）`,
-    `分布：主胜 ${votes.home} · 平局 ${votes.draw} · 主负 ${votes.away}`,
+    counted > 1
+      ? `多数倾向：${pick.label}（${votes[pick.key]}/${counted} 家）`
+      : `倾向：${pick.label}（约 ${pct(pick.prob)}）`,
+    probN
+      ? `概率：主胜 ${pct(probs.home)} · 平局 ${pct(probs.draw)} · 主负 ${pct(probs.away)}`
+      : `分布：主胜 ${votes.home} · 平局 ${votes.draw} · 主负 ${votes.away}`,
   ];
   if (goals?.over25 != null) {
     bullets.push(`机构大球倾向约 ${Math.round(goals.over25 * 100)}%`);
@@ -1050,18 +1406,38 @@ function buildConsensus(sources) {
   };
 }
 
+function isValidTipSource(s) {
+  return (
+    s &&
+    s.pick &&
+    s.tipText &&
+    !isUselessTip(s.tipText, s.title) &&
+    !/体育书|必胜\s*\||^\d{4}-\d{2}-\d{2}/.test(s.tipText)
+  );
+}
+
 export async function fetchWebPredictions(match) {
   const homeNames = teamSearchNames(match.home);
   const awayNames = teamSearchNames(match.away);
-  const results = await searchWebTips(match);
-  if (!results.length) {
-    return {
-      consensus: buildConsensus([]),
-      sources: [],
-    };
+  const oddsSource = buildOddsSource(match);
+
+  // 1) 优先直连预测站联赛页（通常数秒内出结果）
+  let results = await fetchDirectTipCandidates(match);
+
+  // 2) 直连不足再走 1 次搜索兜底
+  if (results.length < 2) {
+    const searched = await searchWebTips(match);
+    const seen = new Set(results.map((r) => r.url.replace(/\/$/, "").toLowerCase()));
+    for (const item of searched) {
+      const key = item.url.replace(/\/$/, "").toLowerCase();
+      if (!seen.has(key)) {
+        results.push(item);
+        seen.add(key);
+      }
+    }
   }
 
-  // 同站点只保留一条，优先可信源 / 高分
+  // 同站点只保留一条
   const byHost = new Map();
   for (const item of results.sort((a, b) => b.score - a.score)) {
     const host = hostOf(item.url) || item.url;
@@ -1071,33 +1447,36 @@ export async function fetchWebPredictions(match) {
     [...byHost.entries()].find(([host]) => host.includes(h))?.[1]
   ).filter(Boolean);
   const rest = [...byHost.values()].filter((item) => !preferred.includes(item));
-  const top = [...preferred, ...rest].slice(0, 5);
+  const top = [...preferred, ...rest].slice(0, 4);
 
-  // 并发抓取，凑满 3 家有效观点即可提前结束后续等待感（仍等当前批次）
   const sources = [];
-  const batches = [top.slice(0, 3), top.slice(3)];
-  for (const batch of batches) {
-    if (!batch.length || sources.length >= 3) break;
+  // 只抓前 3 条详情，超时更短
+  if (top.length) {
     const enriched = await Promise.all(
-      batch.map((item) => enrichTipPage(item, homeNames, awayNames, match))
+      top.slice(0, 3).map((item) => enrichTipPage(item, homeNames, awayNames, match))
     );
     for (const s of enriched) {
-      if (
-        s &&
-        s.pick &&
-        s.tipText &&
-        !isUselessTip(s.tipText, s.title) &&
-        !/体育书|必胜\s*\||^\d{4}-\d{2}-\d{2}/.test(s.tipText)
-      ) {
-        sources.push(s);
-      }
+      if (isValidTipSource(s)) sources.push(s);
     }
   }
 
-  return {
-    consensus: buildConsensus(sources.slice(0, 5)),
-    sources: sources.slice(0, 5),
-  };
+  // 机构观点在前，赔率本地源垫底（保证永不空）
+  const merged = [...sources];
+  if (oddsSource) merged.push(oddsSource);
+  const finalSources = merged.slice(0, 5);
+  const agencyOnly = finalSources.filter((s) => !s.local);
+  const consensus = buildConsensus(agencyOnly.length ? agencyOnly : finalSources);
+  if (!agencyOnly.length && oddsSource) {
+    consensus.name = "市场赔率倾向";
+    consensus.tagline = "机构页暂不可用，已用体彩隐含概率";
+    consensus.bullets = [
+      oddsSource.tipText.split("。")[0],
+      `分布：主胜 ${pct(oddsSource.probs.home)} · 平局 ${pct(oddsSource.probs.draw)} · 主负 ${pct(oddsSource.probs.away)}`,
+      "可稍后重试以补充外部机构摘要",
+    ];
+  }
+
+  return { consensus, sources: finalSources };
 }
 
 export async function fetchMatchIntel(matchId) {
@@ -1116,13 +1495,20 @@ export async function fetchInjuryAnalysis(match) {
   return buildInjuryAnalysis(match, intel, webInjury);
 }
 
-function buildAnalysisPayload(match, web, injury, { complete = true, injuryPending = false } = {}) {
+function buildAnalysisPayload(
+  match,
+  web,
+  injury,
+  { complete = true, injuryPending = false, stakesPending = false, stakes = null } = {}
+) {
   return {
     schema: ANALYSIS_SCHEMA,
     matchId: match.id,
     updatedAt: new Date().toISOString(),
     complete,
     injuryPending,
+    stakesPending,
+    stakes: stakes || buildMatchStakes(match, null),
     consensus: web.consensus,
     sources: web.sources,
     injury,
@@ -1137,8 +1523,23 @@ function buildAnalysisPayload(match, web, injury, { complete = true, injuryPendi
   };
 }
 
+function buildLocalOddsWeb(match) {
+  const oddsSource = buildOddsSource(match);
+  const sources = oddsSource ? [oddsSource] : [];
+  const consensus = buildConsensus(sources);
+  if (oddsSource) {
+    consensus.name = "市场赔率倾向";
+    consensus.tagline = "先给出体彩隐含概率，机构摘要加载中…";
+    consensus.bullets = [
+      oddsSource.tipText.split("。")[0],
+      `分布：主胜 ${pct(oddsSource.probs.home)} · 平局 ${pct(oddsSource.probs.draw)} · 主负 ${pct(oddsSource.probs.away)}`,
+    ];
+  }
+  return { consensus, sources };
+}
+
 /**
- * 先返回机构预测（可 onUpdate 渐进渲染），伤停在后台补齐。
+ * 先秒出赔率倾向 + 赛果影响骨架，再补机构摘要 / 积分形势 / 伤停。
  * @param {{ onUpdate?: (analysis: object) => void }} [options]
  */
 export async function fetchAndAnalyzeMatch(match, options = {}) {
@@ -1146,30 +1547,46 @@ export async function fetchAndAnalyzeMatch(match, options = {}) {
   const cached = cache.get(match.id);
   if (cached?.schema === ANALYSIS_SCHEMA && cached.complete) return cached;
 
-  const intelP = fetchMatchIntel(match.id);
-  const webP = fetchWebPredictions(match);
-  const injuryP = fetchWebInjuries(match);
-
-  // 先等预测 + 体彩官方伤停，尽快出首屏
-  const [intel, web] = await Promise.all([intelP, webP]);
-  let analysis = buildAnalysisPayload(
-    match,
-    web,
-    buildInjuryAnalysis(match, intel, null),
-    { complete: false, injuryPending: true }
-  );
+  // 首屏：赔率秒出（无网络等待）
+  let web = buildLocalOddsWeb(match);
+  let stakes = buildMatchStakes(match, null);
+  let analysis = buildAnalysisPayload(match, web, null, {
+    complete: false,
+    injuryPending: true,
+    stakesPending: true,
+    stakes,
+  });
   cache.set(match.id, analysis);
   onUpdate?.(analysis);
 
-  // 再补网页伤停（通常再等几秒）
+  const intelP = fetchMatchIntel(match.id);
+  const webP = fetchWebPredictions(match);
+  const injuryP = fetchWebInjuries(match);
+  const standingsP = fetchLeagueStandingsByMatch(match.id).catch(() => null);
+
+  // 机构预测 + 官方伤停 + 积分榜并行
+  const [intel, webFull, standings] = await Promise.all([intelP, webP, standingsP]);
+  web = webFull;
+  stakes = buildMatchStakes(match, standings?.rows || null);
+  analysis = buildAnalysisPayload(match, web, buildInjuryAnalysis(match, intel, null), {
+    complete: false,
+    injuryPending: true,
+    stakesPending: false,
+    stakes,
+  });
+  cache.set(match.id, analysis);
+  onUpdate?.(analysis);
+
   try {
     const webInjury = await injuryP;
     analysis = buildAnalysisPayload(match, web, buildInjuryAnalysis(match, intel, webInjury), {
       complete: true,
       injuryPending: false,
+      stakesPending: false,
+      stakes,
     });
   } catch {
-    analysis = { ...analysis, complete: true, injuryPending: false };
+    analysis = { ...analysis, complete: true, injuryPending: false, stakesPending: false };
   }
   cache.set(match.id, analysis);
   onUpdate?.(analysis);
@@ -1252,11 +1669,13 @@ export function outcomeClass(key) {
 }
 
 export function webSourcesHtml(sources = []) {
-  if (!sources.length) {
-    return `<div class="prediction-source-card"><p class="injury-empty">未检索到可用的机构预测摘要，请稍后重试。</p></div>`;
+  const list = sources || [];
+  const agency = list.filter((s) => !s.local);
+  if (!agency.length && !list.length) {
+    return `<div class="prediction-source-card"><p class="injury-empty">暂无外部机构摘要；上方已展示市场赔率倾向，可稍后重试。</p></div>`;
   }
 
-  return sources
+  return list
     .map((src) => {
       const pickBadge = src.pick
         ? `<span class="prediction-source-pick prediction-source-pick--${outcomeClass(src.pick.key)}">${src.pick.label || src.pick.short}</span>`
@@ -1266,7 +1685,7 @@ export function webSourcesHtml(sources = []) {
         <div class="prediction-source-header">
           <div>
             <div class="prediction-source-name">${src.name}</div>
-            <div class="prediction-source-tag">${src.title || "机构预测观点"}</div>
+            <div class="prediction-source-tag">${src.title || (src.local ? "本地市场推算" : "机构预测观点")}</div>
           </div>
           ${pickBadge}
         </div>
@@ -1274,4 +1693,56 @@ export function webSourcesHtml(sources = []) {
       </div>`;
     })
     .join("");
+}
+
+export function stakesReportHtml(stakes, { pending = false } = {}) {
+  if (!stakes) {
+    return pending
+      ? `<div class="prediction-stakes-card"><p class="injury-empty">赛果影响分析加载中…</p></div>`
+      : "";
+  }
+
+  const favored = stakes.favored;
+  const favoredHtml = favored
+    ? `<div class="stakes-favored stakes-favored--${outcomeClass(favored.key)}">
+        <div class="stakes-favored-label">本场输赢倾向</div>
+        <div class="stakes-favored-value">${favored.text}</div>
+      </div>`
+    : `<div class="stakes-favored"><div class="stakes-favored-value">${stakes.bullets?.[0] || "倾向待定"}</div></div>`;
+
+  const acceptNotes = [stakes.home, stakes.away]
+    .filter((s) => s.acceptDraw && s.acceptDrawNote)
+    .map((s) => `<li><strong>${s.team}</strong>可接受平局：${s.acceptDrawNote}</li>`);
+
+  const scenarioRows = (stakes.scenarios || [])
+    .map(
+      (sc) => `
+      <div class="stakes-scenario">
+        <div class="stakes-scenario-result">${sc.result}</div>
+        <ul class="stakes-scenario-list">
+          <li>${sc.home}</li>
+          <li>${sc.away}</li>
+        </ul>
+      </div>`
+    )
+    .join("");
+
+  return `
+    <div class="prediction-stakes-card">
+      <div class="prediction-source-header">
+        <div>
+          <div class="prediction-source-name">赛果影响</div>
+          <div class="prediction-source-tag">${
+            stakes.isCup ? "杯赛/淘汰语境 · 晋级与出局" : "联赛积分语境 · 争冠/欧战/保级"
+          }${pending ? " · 积分榜补齐中" : ""}</div>
+        </div>
+      </div>
+      ${favoredHtml}
+      ${scenarioRows}
+      ${
+        acceptNotes.length
+          ? `<ul class="stakes-accept-list">${acceptNotes.join("")}</ul>`
+          : ""
+      }
+    </div>`;
 }
