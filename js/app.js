@@ -15,6 +15,7 @@ import { leagueBadgeHtml, teamLabel, isRealTeam, formatRank, flagHtml } from "./
 import {
   fetchAndAnalyzeMatch,
   clearPredictionCache,
+  ANALYSIS_SCHEMA,
   probBarHtml,
   outcomeClass,
   injuryReportHtml,
@@ -148,6 +149,8 @@ function countFinished(matches) {
 }
 
 function bindEvents() {
+  document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
+
   els.tabBar.addEventListener("click", (e) => {
     const btn = e.target.closest(".tab-item");
     if (!btn) return;
@@ -399,16 +402,23 @@ function historyTeamBlockHtml(team, matches, metaMatch = null) {
     </div>`;
 }
 
-function h2hBlockHtml(h2hMatches) {
+function h2hBlockHtml(h2hMatches, perspectiveTeam) {
   if (!h2hMatches.length) return "";
   const rows = h2hMatches
     .map((m) => {
       const when = formatMatchWhen(m) || m.date || "";
       const score = formatHistoryScoreText(m) || `${m.homeScore}:${m.awayScore}`;
-      return `<div class="h2h-match-item">${when} ${teamLabel(m.home)} ${score} ${teamLabel(m.away)}</div>`;
+      const result = teamResultLabel(m, perspectiveTeam);
+      const resultClass =
+        result === "胜" ? "win" : result === "负" ? "loss" : result === "平" ? "draw" : "pending";
+      return `
+        <div class="h2h-match-item result-${resultClass}">
+          <span class="standings-match-result ${resultClass}">${result}</span>
+          <span class="h2h-match-body">${when} ${teamLabel(m.home)} ${score} ${teamLabel(m.away)}</span>
+        </div>`;
     })
     .join("");
-  return `<div class="detail-row detail-row--stack"><span class="label">历史交锋</span><span class="value h2h-list">${rows}</span></div>`;
+  return `<div class="detail-row detail-row--stack"><span class="label">历史交锋<span class="h2h-perspective">（${teamLabel(perspectiveTeam)}）</span></span><span class="value h2h-list">${rows}</span></div>`;
 }
 
 function historyTeamBlockLoadingHtml(team, metaMatch = null) {
@@ -458,7 +468,7 @@ async function openMatchDetail(match) {
         ${match.odds ? `<div class="detail-row"><span class="label">胜平负</span><span class="value">${formatOddsShort(match.odds)}</span></div>` : ""}
         ${match.hhad?.line ? `<div class="detail-row"><span class="label">让球(${match.hhad.line})</span><span class="value">胜 ${match.hhad.h} / 平 ${match.hhad.d} / 负 ${match.hhad.a}</span></div>` : ""}
         ${match.homeRank != null || match.awayRank != null ? `<div class="detail-row"><span class="label">联赛排名</span><span class="value">${teamLabel(match.home)} ${formatRank(match.homeRank, match.rankLeague) || "—"} · ${teamLabel(match.away)} ${formatRank(match.awayRank, match.rankLeague) || "—"}</span></div>` : ""}
-        ${h2hBlockHtml(h2hMatches)}
+        ${h2hBlockHtml(h2hMatches, match.home)}
       </div>
       ${historyTeamBlockHtml(match.home, homeMatches, match)}
       ${historyTeamBlockHtml(match.away, awayMatches, match)}
@@ -629,7 +639,7 @@ async function openPredictionDetail(match) {
 
   try {
     let analysis = state.predictionCache.get(match.id);
-    if (!analysis) {
+    if (!analysis || analysis.schema !== ANALYSIS_SCHEMA) {
       state.predictionLoadingId = match.id;
       analysis = await fetchAndAnalyzeMatch(match);
       state.predictionCache.set(match.id, analysis);
@@ -689,7 +699,7 @@ function standingsMatchItemHtml(match, team) {
     : `${teamLabel(match.home)} vs ${teamLabel(match.away)}（未赛）`;
 
   return `
-    <div class="standings-match-item">
+    <div class="standings-match-item result-${resultClass}">
       <div class="standings-match-meta">
         <span class="standings-match-round">${roundLabel}</span>
         ${when ? `<span class="history-match-when">${when}</span>` : ""}

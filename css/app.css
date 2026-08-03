@@ -44,6 +44,8 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
+  touch-action: manipulation;
+  -ms-touch-action: manipulation;
 }
 
 #app {
@@ -309,6 +311,12 @@ html, body {
   white-space: nowrap;
 }
 
+.h2h-perspective {
+  margin-left: 2px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
 .h2h-list {
   display: flex !important;
   flex-direction: column;
@@ -319,9 +327,50 @@ html, body {
 }
 
 .h2h-match-item {
-  font-size: 13px;
-  line-height: 1.45;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.35;
   font-weight: 500;
+  border: 1px solid transparent;
+}
+
+.h2h-match-item.result-win {
+  background: var(--success-soft);
+  border-color: #bbf7d0;
+}
+
+.h2h-match-item.result-loss {
+  background: var(--danger-soft);
+  border-color: #fecaca;
+}
+
+.h2h-match-item.result-draw {
+  background: var(--primary-soft);
+  border-color: #bfdbfe;
+}
+
+.h2h-match-item.result-pending {
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.h2h-match-item .standings-match-result {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 5px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.h2h-match-body {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .history-match-meta {
@@ -932,6 +981,32 @@ html, body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+.standings-match-item.result-win {
+  background: var(--success-soft);
+  border-color: #bbf7d0;
+}
+
+.standings-match-item.result-loss {
+  background: var(--danger-soft);
+  border-color: #fecaca;
+}
+
+.standings-match-item.result-draw {
+  background: var(--primary-soft);
+  border-color: #bfdbfe;
+}
+
+.standings-match-item.result-pending {
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.standings-match-item.result-win .standings-match-result,
+.standings-match-item.result-loss .standings-match-result,
+.standings-match-item.result-draw .standings-match-result {
+  background: rgba(255, 255, 255, 0.55);
 }
 
 .standings-match-meta {
