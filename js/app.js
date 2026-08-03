@@ -842,13 +842,15 @@ function predictionFormCardHtml(match, form) {
     </div>`;
 }
 
-function teamGoalsStats(matches, team) {
+function teamGoalsStats(matches, team, { venue = "any" } = {}) {
   const rows = [];
   for (const m of matches || []) {
     if (!m?.finished || m.homeScore == null || m.awayScore == null) continue;
     const resolved = resolveTeamInMatch(m, team);
     if (!resolved) continue;
     const isHome = resolved === m.home;
+    if (venue === "home" && !isHome) continue;
+    if (venue === "away" && isHome) continue;
     const gf = isHome ? Number(m.homeScore) : Number(m.awayScore);
     const ga = isHome ? Number(m.awayScore) : Number(m.homeScore);
     if (!Number.isFinite(gf) || !Number.isFinite(ga)) continue;
@@ -875,6 +877,118 @@ function teamGoalsStats(matches, team) {
   };
 }
 
+function parseTeamPerspectiveScore(text) {
+  const m = String(text || "").match(/(\d+)\s*[:：]\s*(\d+)/);
+  if (!m) return null;
+  return { gf: Number(m[1]), ga: Number(m[2]) };
+}
+
+function factorial(n) {
+  let r = 1;
+  for (let i = 2; i <= n; i += 1) r *= i;
+  return r;
+}
+
+function poissonPmf(k, lambda) {
+  if (!(lambda > 0)) return k === 0 ? 1 : 0;
+  return (Math.exp(-lambda) * lambda ** k) / factorial(k);
+}
+
+function mixNum(a, b, weightA = 0.5) {
+  if (a == null) return b;
+  if (b == null) return a;
+  return a * weightA + b * (1 - weightA);
+}
+
+function clampNum(n, lo, hi) {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/** 主客近况 + 共同对手 → 双方预期进球，再泊松求最可能比分 */
+function buildExpectedGoals(match, form) {
+  const homeAll = teamGoalsStats(form?.home, match.home);
+  const awayAll = teamGoalsStats(form?.away, match.away);
+  const homeAtHome = teamGoalsStats(form?.home, match.home, { venue: "home" });
+  const awayAtAway = teamGoalsStats(form?.away, match.away, { venue: "away" });
+
+  // 主队进球：主场攻击力 vs 客队客场防守
+  let lambdaHome = mixNum(
+    homeAtHome?.avgFor ?? homeAll?.avgFor,
+    awayAtAway?.avgAgainst ?? awayAll?.avgAgainst,
+    0.55
+  );
+  // 客队进球：客场攻击力 vs 主队主场防守
+  let lambdaAway = mixNum(
+    awayAtAway?.avgFor ?? awayAll?.avgFor,
+    homeAtHome?.avgAgainst ?? homeAll?.avgAgainst,
+    0.55
+  );
+
+  const commonItems = form?.commonOpponents?.items || [];
+  if (commonItems.length) {
+    let hGf = 0;
+    let hGa = 0;
+    let aGf = 0;
+    let aGa = 0;
+    let n = 0;
+    for (const it of commonItems) {
+      const hs = parseTeamPerspectiveScore(it.home?.score);
+      const as = parseTeamPerspectiveScore(it.away?.score);
+      if (!hs || !as) continue;
+      hGf += hs.gf;
+      hGa += hs.ga;
+      aGf += as.gf;
+      aGa += as.ga;
+      n += 1;
+    }
+    if (n) {
+      // 共同对手：用「对同一对手的进/失」交叉估计本场攻防
+      const lambdaHomeCommon = (hGf / n + aGa / n) / 2;
+      const lambdaAwayCommon = (aGf / n + hGa / n) / 2;
+      lambdaHome = mixNum(lambdaHome, lambdaHomeCommon, 0.62);
+      lambdaAway = mixNum(lambdaAway, lambdaAwayCommon, 0.62);
+    }
+  }
+
+  if (lambdaHome == null && lambdaAway == null) return null;
+  lambdaHome = clampNum(lambdaHome ?? 1.1, 0.25, 3.4);
+  lambdaAway = clampNum(lambdaAway ?? 1.0, 0.2, 3.2);
+
+  return {
+    lambdaHome,
+    lambdaAway,
+    homeAll,
+    awayAll,
+    homeAtHome,
+    awayAtAway,
+    commonCount: commonItems.length,
+  };
+}
+
+function buildTopScorePicks(lambdaHome, lambdaAway, maxGoals = 5) {
+  const grid = [];
+  for (let h = 0; h <= maxGoals; h += 1) {
+    for (let a = 0; a <= maxGoals; a += 1) {
+      grid.push({
+        h,
+        a,
+        p: poissonPmf(h, lambdaHome) * poissonPmf(a, lambdaAway),
+        total: h + a,
+      });
+    }
+  }
+  const mass = grid.reduce((s, x) => s + x.p, 0) || 1;
+  for (const x of grid) x.p /= mass;
+  grid.sort((a, b) => b.p - a.p || a.total - b.total);
+  return grid.slice(0, 2).map((x) => ({
+    home: x.h,
+    away: x.a,
+    text: `${x.h}:${x.a}`,
+    prob: x.p,
+    total: x.total,
+  }));
+}
+
 function blendRate(formRate, webRate, formWeight = 0.6) {
   if (formRate == null && webRate == null) return null;
   if (formRate == null) return webRate;
@@ -882,43 +996,66 @@ function blendRate(formRate, webRate, formWeight = 0.6) {
   return formRate * formWeight + webRate * (1 - formWeight);
 }
 
-function buildScoreOutlook(match, form, webGoals = null) {
-  if (!form || form.pending) return { pending: true };
-  const home = teamGoalsStats(form.home, match.home);
-  const away = teamGoalsStats(form.away, match.away);
-  if (!home && !away && !webGoals) return null;
-
+/** 大小球期望：只看近况进球结构（+机构），不跟预测比分挂钩 */
+function buildGoalsMarketOutlook(homeStats, awayStats, webGoals = null) {
   const avg = (a, b) => {
     if (a == null) return b;
     if (b == null) return a;
     return (a + b) / 2;
   };
 
+  const formExpected = avg(homeStats?.avgTotal, awayStats?.avgTotal);
   const expected =
-    webGoals?.avgGoals != null
-      ? webGoals.avgGoals * 0.45 + avg(home?.avgTotal, away?.avgTotal) * 0.55
-      : avg(home?.avgTotal, away?.avgTotal);
+    webGoals?.avgGoals != null && formExpected != null
+      ? webGoals.avgGoals * 0.35 + formExpected * 0.65
+      : webGoals?.avgGoals ?? formExpected;
 
-  const over25 = blendRate(avg(home?.over25Rate, away?.over25Rate), webGoals?.over25);
-  const bigScore = blendRate(avg(home?.bigScoreRate, away?.bigScoreRate), webGoals?.over35);
-  const btts = blendRate(avg(home?.bttsRate, away?.bttsRate), webGoals?.btts);
-  const blowout = avg(home?.blowoutRate, away?.blowoutRate);
+  const over25 = blendRate(avg(homeStats?.over25Rate, awayStats?.over25Rate), webGoals?.over25);
+  const bigScore = blendRate(avg(homeStats?.bigScoreRate, awayStats?.bigScoreRate), webGoals?.over35);
+  const btts = blendRate(avg(homeStats?.bttsRate, awayStats?.bttsRate), webGoals?.btts);
+  const blowout = avg(homeStats?.blowoutRate, awayStats?.blowoutRate);
 
   let lean = "进球走势一般";
   if ((bigScore != null && bigScore >= 0.42) || (expected != null && expected >= 3.3)) lean = "偏大比分";
   else if ((over25 != null && over25 >= 0.58) || (expected != null && expected >= 2.7)) lean = "偏大球";
   else if ((over25 != null && over25 <= 0.42) || (expected != null && expected <= 2.2)) lean = "偏小球";
 
+  return { lean, expected, over25, bigScore, btts, blowout };
+}
+
+function buildScoreOutlook(match, form, webGoals = null) {
+  if (!form || form.pending) return { pending: true };
+  const eg = buildExpectedGoals(match, form);
+  const home = eg?.homeAll || teamGoalsStats(form.home, match.home);
+  const away = eg?.awayAll || teamGoalsStats(form.away, match.away);
+  if (!eg && !home && !away && !webGoals) return null;
+
+  // 比分：主客 + 共同对手 → 泊松
+  const topScores = eg ? buildTopScorePicks(eg.lambdaHome, eg.lambdaAway) : [];
+  // 大小球：近况结构独立计算，不随预测比分改动
+  const market = buildGoalsMarketOutlook(home, away, webGoals);
+
+  const sources = [];
+  if (eg?.homeAtHome || eg?.awayAtAway) sources.push("主客场近况");
+  else if (eg) sources.push("近况进球");
+  if (eg?.commonCount) sources.push(`共同对手×${eg.commonCount}`);
+
   return {
     pending: false,
-    lean,
-    expected,
-    over25,
-    bigScore,
-    btts,
-    blowout,
+    lean: market.lean,
+    expected: market.expected,
+    lambdaHome: eg?.lambdaHome ?? null,
+    lambdaAway: eg?.lambdaAway ?? null,
+    topScores,
+    over25: market.over25,
+    bigScore: market.bigScore,
+    btts: market.btts,
+    blowout: market.blowout,
     home,
     away,
+    homeAtHome: eg?.homeAtHome || null,
+    awayAtAway: eg?.awayAtAway || null,
+    sourceTag: sources.join(" + ") || "近况进球",
   };
 }
 
@@ -939,30 +1076,54 @@ function predictionScoreCardHtml(match, outlook) {
     return `
       <div class="prediction-score-card">
         <div class="prediction-form-card-head">
-          <div class="prediction-source-name">大比分 / 进球倾向</div>
-          <div class="prediction-source-tag">正在根据近况估算…</div>
+          <div class="prediction-source-name">比分预测</div>
+          <div class="prediction-source-tag">正在根据主客与共同对手估算…</div>
         </div>
       </div>`;
   }
 
-  const homeLine = outlook.home
-    ? `${teamLabel(match.home)}场均进 ${outlook.home.avgFor.toFixed(1)} / 失 ${outlook.home.avgAgainst.toFixed(1)}`
-    : "";
-  const awayLine = outlook.away
-    ? `${teamLabel(match.away)}场均进 ${outlook.away.avgFor.toFixed(1)} / 失 ${outlook.away.avgAgainst.toFixed(1)}`
-    : "";
-  const expectedText =
-    outlook.expected != null ? `预期总进球约 ${outlook.expected.toFixed(1)}` : "预期总进球暂缺";
+  const top = outlook.topScores || [];
+  if (top.length < 1) return "";
+
+  const topHtml = top
+    .map(
+      (s, i) => `
+      <div class="score-pick score-pick--${i === 0 ? "primary" : "secondary"}">
+        <div class="score-pick-label">${i === 0 ? "最可能" : "次选"}</div>
+        <div class="score-pick-value">${s.text}</div>
+        <div class="score-pick-prob">${Math.round(s.prob * 100)}%</div>
+      </div>`
+    )
+    .join("");
+
+  const homeVenue = outlook.homeAtHome
+    ? `${teamLabel(match.home)}主场场均进 ${outlook.homeAtHome.avgFor.toFixed(1)} / 失 ${outlook.homeAtHome.avgAgainst.toFixed(1)}`
+    : outlook.home
+      ? `${teamLabel(match.home)}场均进 ${outlook.home.avgFor.toFixed(1)} / 失 ${outlook.home.avgAgainst.toFixed(1)}`
+      : "";
+  const awayVenue = outlook.awayAtAway
+    ? `${teamLabel(match.away)}客场场均进 ${outlook.awayAtAway.avgFor.toFixed(1)} / 失 ${outlook.awayAtAway.avgAgainst.toFixed(1)}`
+    : outlook.away
+      ? `${teamLabel(match.away)}场均进 ${outlook.away.avgFor.toFixed(1)} / 失 ${outlook.away.avgAgainst.toFixed(1)}`
+      : "";
 
   return `
     <div class="prediction-score-card">
       <div class="prediction-form-card-head">
-        <div class="prediction-source-name">大比分 / 进球倾向</div>
-        <div class="prediction-source-tag">近 10 场进球结构 + 机构大球观点</div>
+        <div class="prediction-source-name">比分预测</div>
+        <div class="prediction-source-tag">${outlook.sourceTag || "主客近况 + 共同对手"} · 泊松模型</div>
       </div>
+      <div class="score-picks">${topHtml}</div>
+      ${
+        outlook.lambdaHome != null && outlook.lambdaAway != null
+          ? `<div class="score-outlook-meta score-outlook-meta--block">比分模型期望进球 ${outlook.lambdaHome.toFixed(1)} : ${outlook.lambdaAway.toFixed(1)}</div>`
+          : ""
+      }
       <div class="score-outlook-banner">
         <span class="score-outlook-lean">${outlook.lean}</span>
-        <span class="score-outlook-meta">${expectedText}</span>
+        <span class="score-outlook-meta">${
+          outlook.expected != null ? `大小球期望总进球约 ${outlook.expected.toFixed(1)}` : "大小球期望暂缺"
+        }</span>
       </div>
       <div class="prob-bars score-prob-bars">
         ${scoreProbRowHtml("大球≥3", outlook.over25, "over")}
@@ -971,7 +1132,8 @@ function predictionScoreCardHtml(match, outlook) {
         ${scoreProbRowHtml("净胜2+", outlook.blowout, "blowout")}
       </div>
       <div class="score-outlook-note">
-        ${[homeLine, awayLine].filter(Boolean).join(" · ") || "暂无足够进球赛果样本"}
+        ${[homeVenue, awayVenue].filter(Boolean).join(" · ") || "暂无足够进球赛果样本"}
+        <br>比分取主客/共同对手泊松；大小球取近况进球结构，两者独立。
       </div>
     </div>`;
 }
@@ -1373,7 +1535,7 @@ function predictionDetailHtml(match, analysis) {
 
     ${injuryReportHtml(analysis.injury, match, { pending: !!analysis.injuryPending })}
 
-    <p class="predictions-disclaimer">倾向综合市场赔率与公开机构摘要；赛果影响依据积分榜/杯赛属性启发式推算，仅供参考，不构成投注建议。</p>
+    <p class="predictions-disclaimer">倾向综合市场赔率与公开机构摘要；精确比分由主客近况与共同对手泊松推算，大小球期望另按近况进球结构估算（互不改写）；赛果影响为启发式，仅供参考，不构成投注建议。</p>
   `;
 }
 

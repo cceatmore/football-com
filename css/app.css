@@ -2468,6 +2468,49 @@ html, body {
   color: var(--muted);
 }
 
+.score-picks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 10px 0 12px;
+}
+
+.score-pick {
+  text-align: center;
+  padding: 12px 10px;
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.score-pick--primary {
+  background: var(--primary-soft);
+}
+
+.score-pick-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.score-pick-value {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.score-pick--primary .score-pick-value {
+  color: var(--primary);
+}
+
+.score-pick-prob {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
 .score-outlook-banner {
   display: flex;
   align-items: center;
@@ -2491,6 +2534,12 @@ html, body {
   font-size: 12px;
   color: var(--text-secondary);
   white-space: nowrap;
+}
+
+.score-outlook-meta--block {
+  display: block;
+  margin: -4px 0 10px;
+  white-space: normal;
 }
 
 .score-outlook-note {
