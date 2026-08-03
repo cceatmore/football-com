@@ -38,8 +38,18 @@ const TEAM_EN = {
   韦斯特罗: ["Vasteras", "Västerås", "Västerås SK", "Västerås SK FK"],
   塞伊奈: ["SJK", "SJK Seinajoki", "Seinajoen JK", "Seinäjoen JK"],
   赫尔辛基: ["HJK", "HJK Helsinki"],
-  巴竞技: ["Athletico Paranaense", "Athletico/PR", "Athletico", "Atletico Paranaense"],
-  维多利亚: ["Vitória/BA", "Vitoria/BA", "EC Vitoria", "Vitória", "Vitoria"],
+  巴竞技: [
+    "Athletico Paranaense",
+    "Athletico/PR",
+    "Athletico PR",
+    "Atletico PR",
+    "Atlético PR",
+    "Athletico",
+    "Atletico Paranaense",
+    "巴拉纳竞技",
+    "巴拉那竞技",
+  ],
+  维多利亚: ["Vitória/BA", "Vitoria/BA", "Vitória BA", "Vitoria BA", "EC Vitoria", "Vitória", "Vitoria"],
 };
 
 /** 联赛 → Injuries&Suspensions 栏目 slug（优先抓栏目首页 + 站内搜索） */
@@ -57,30 +67,34 @@ const LEAGUE_IAS_SLUGS = {
 };
 
 const TRUSTED_HOSTS = [
-  "forebet.com",
   "predictz.com",
+  "forebet.com",
   "windrawwin.com",
   "betimate.com",
-  "tips.gg",
+  "betclan.com",
   "sportsgambler.com",
   "freesupertips.com",
-  "betclan.com",
   "soccervista.com",
   "sportsmole.co.uk",
   "footballpredictions.net",
-  "predictapp.com",
   "bettingtips.today",
   "betonvalue.com",
-  "varim.net",
   "olbg.com",
-  "soccerway.com",
-  "whoscored.com",
-  "forebet",
+];
+
+/** 优先定向检索的机构（比泛搜更稳） */
+const PRIORITY_TIP_SITES = [
+  "predictz.com",
+  "windrawwin.com",
+  "betimate.com",
+  "betclan.com",
+  "forebet.com",
+  "sportsgambler.com",
 ];
 
 const cache = new Map();
 /** 预测结果结构版本；变更后自动丢弃旧缓存（避免串场摘要残留） */
-export const ANALYSIS_SCHEMA = 5;
+export const ANALYSIS_SCHEMA = 6;
 
 /** 赔率/资讯站，不做预测摘要 */
 const BLOCKED_HOSTS = [
@@ -90,6 +104,8 @@ const BLOCKED_HOSTS = [
   "sina.com.cn",
   "zhibo8.cc",
   "dongqiudi.com",
+  "zgzcw.com",
+  "okooo.com",
 ];
 
 async function fetchUniform(path) {
@@ -151,9 +167,9 @@ function hostOf(url) {
 
 function sourceLabel(url) {
   const host = hostOf(url);
-  if (!host) return "外部来源";
+  if (!host) return "外部机构";
   const map = {
-    "forebet.com": "Forebet",
+    "forebet.com": "Forebet 数学模型",
     "predictz.com": "PredictZ",
     "windrawwin.com": "WinDrawWin",
     "betimate.com": "Betimate",
@@ -164,11 +180,11 @@ function sourceLabel(url) {
     "soccervista.com": "SoccerVista",
     "sportsmole.co.uk": "SportsMole",
     "footballpredictions.net": "FootballPredictions",
-    "bettingtips.today": "BettingTips.Today",
+    "bettingtips.today": "BettingTips",
     "betonvalue.com": "BetOnValue",
     "olbg.com": "OLBG",
   };
-  return map[host] || host;
+  return map[host] || host.replace(/^www\./, "");
 }
 
 function isTrustedHost(url) {
@@ -178,7 +194,19 @@ function isTrustedHost(url) {
 
 function isBlockedHost(url) {
   const host = hostOf(url);
+  if (/500\.com|sporttery|zhibo8|dongqiudi|zgzcw|okooo/i.test(host)) return true;
   return BLOCKED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
+function isBlockedResult(item) {
+  if (!item?.url || isBlockedHost(item.url)) return true;
+  const hay = `${item.title || ""} ${item.url} ${item.snippet || ""}`;
+  if (/500彩票|数据分析-500|竞彩官方|澳客网|即时赔率表/i.test(hay)) return true;
+  // Tips.GG 赔率页噪音极大，直接跳过
+  if (/tips\.gg/i.test(item.url) && /赔率|odds|投注线|sportsbook|moneyline|实时赔率/i.test(hay)) {
+    return true;
+  }
+  return false;
 }
 
 /** 首页/栏目列表页，不是单场预测 */
@@ -204,7 +232,7 @@ function isGenericListingUrl(url) {
 
 /** 标题或 URL 必须同时出现双方，避免靠列表页正文误命中 */
 function isMatchSpecificResult(item, homeNames, awayNames) {
-  if (!item?.url || isBlockedHost(item.url) || isGenericListingUrl(item.url)) return false;
+  if (!item?.url || isBlockedResult(item) || isGenericListingUrl(item.url)) return false;
   const titleUrl = `${item.title || ""} ${item.url}`;
   return teamHitCount(titleUrl, homeNames, awayNames) >= 2;
 }
@@ -620,7 +648,10 @@ function foldAscii(text) {
   return String(text || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[/_.-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function textMentionsAny(text, names) {
@@ -644,11 +675,90 @@ function scoreResult(item, homeNames, awayNames) {
 
   const hay = `${item.title} ${item.snippet} ${item.url}`;
   let score = 10;
-  if (isTrustedHost(item.url)) score += 5;
-  if (/predict|tip|preview|分析|预测/i.test(hay)) score += 4;
+  if (isTrustedHost(item.url)) score += 6;
+  if (PRIORITY_TIP_SITES.some((h) => hostOf(item.url).includes(h))) score += 4;
+  if (/predict|tip|preview|分析|预测|palpite|pronostic/i.test(hay)) score += 4;
   if (/h2h|stats|lineup/i.test(hay)) score += 1;
-  if (/odds\.|赔率|投注|数据分析-500|彩票网/i.test(hay)) score -= 6;
+  if (/odds\.|赔率|投注|sportsbook|moneyline|彩票网|数据分析-500/i.test(hay)) score -= 8;
+  if (/tips\.gg/i.test(item.url)) score -= 5;
   return score;
+}
+
+function normalizeProbTriplet(h, d, a) {
+  const home = Number(h);
+  const draw = Number(d);
+  const away = Number(a);
+  if (![home, draw, away].every((n) => Number.isFinite(n) && n >= 0 && n <= 100)) return null;
+  if (home + draw + away < 50) return null;
+  return {
+    home: home / 100,
+    draw: draw / 100,
+    away: away / 100,
+  };
+}
+
+/** 从机构页提取 1X2 概率 */
+function extractMatchProbs(text) {
+  if (!text) return null;
+  const t = String(text);
+
+  const homeWin = matchPct(t, [/Home\s*win\s*(\d{1,2}(?:\.\d+)?)\s*%/i]);
+  const awayWin = matchPct(t, [/Away\s*win\s*(\d{1,2}(?:\.\d+)?)\s*%/i]);
+  const drawWin = matchPct(t, [/\bDraw\s*(\d{1,2}(?:\.\d+)?)\s*%/i]);
+  if (homeWin != null && drawWin != null && awayWin != null) {
+    return normalizeProbTriplet(homeWin, drawWin, awayWin);
+  }
+
+  // WinDrawWin / BetClan: "66% Draw 23% Away 11%"（首位为主胜）
+  const m1 = t.match(
+    /(\d{1,2}(?:\.\d+)?)\s*%\s*Draw\s*(\d{1,2}(?:\.\d+)?)\s*%\s*Away\s*(\d{1,2}(?:\.\d+)?)\s*%/i
+  );
+  if (m1) return normalizeProbTriplet(m1[1], m1[2], m1[3]);
+
+  const m2 = t.match(
+    /Home(?:\s*win)?\s*(\d{1,2}(?:\.\d+)?)\s*%[^\d]{0,24}Draw\s*(\d{1,2}(?:\.\d+)?)\s*%[^\d]{0,24}Away(?:\s*win)?\s*(\d{1,2}(?:\.\d+)?)\s*%/i
+  );
+  if (m2) return normalizeProbTriplet(m2[1], m2[2], m2[3]);
+
+  // Forebet: Prob. % … 48% / 26% / 18%（中间可能夹标题或换行）
+  const m3 = t.match(
+    /Prob\.?\s*%[\s\S]{0,500}?(\d{1,2})\s*%[^\d%]{0,60}(\d{1,2})\s*%[^\d%]{0,60}(\d{1,2})\s*%/i
+  );
+  if (m3) return normalizeProbTriplet(m3[1], m3[2], m3[3]);
+
+  const m4 = t.match(/(\d{1,2})\s*%\s+(\d{1,2})\s*%\s+(\d{1,2})\s*%\s*(?:[A-Z][a-z]+|[1-3]\s*[-–]\s*[0-3])/);
+  if (m4) return normalizeProbTriplet(m4[1], m4[2], m4[3]);
+
+  return null;
+}
+
+function extractPredictZExtras(text) {
+  const block = String(text).match(/PREDICTZ TIP([\s\S]{0,280})/i)?.[1] || "";
+  if (!block) return [];
+  const extras = [];
+  if (/Both Teams To Score\s*[-–:]\s*Yes/i.test(block)) extras.push("双方都有进球");
+  if (/Both Teams To Score\s*[-–:]\s*No/i.test(block)) extras.push("不会都进球");
+  if (/Over\s*2\.5\s*Goals/i.test(block)) extras.push("大 2.5 球");
+  if (/Under\s*2\.5\s*Goals/i.test(block)) extras.push("小 2.5 球");
+  return extras;
+}
+
+function formatChineseTip(pickKey, probs, extras = []) {
+  const outcome = OUTCOMES.find((o) => o.key === pickKey);
+  if (!outcome && !probs) return "";
+  const parts = [];
+  if (outcome && probs?.[pickKey] != null) {
+    parts.push(`倾向${outcome.label}（约 ${Math.round(probs[pickKey] * 100)}%）`);
+  } else if (outcome) {
+    parts.push(`倾向${outcome.label}`);
+  }
+  if (probs) {
+    parts.push(
+      `概率：主胜 ${Math.round(probs.home * 100)}% / 平局 ${Math.round(probs.draw * 100)}% / 主负 ${Math.round(probs.away * 100)}%`
+    );
+  }
+  if (extras.length) parts.push(extras.slice(0, 2).join("，"));
+  return parts.join("。");
 }
 
 function detectPickFromText(text, homeNames, awayNames) {
@@ -660,13 +770,16 @@ function detectPickFromText(text, homeNames, awayNames) {
     .join("\n")
     .replace(/\s+/g, " ");
   const t = cleaned;
-  if (teamHitCount(t, homeNames, awayNames) < 1) return null;
+  if (teamHitCount(t, homeNames, awayNames) < 1 && !/PREDICTZ TIP|Home win\s*\d/i.test(t)) return null;
 
   const homeRe = homeNames.map(escapeRegExp).filter(Boolean).join("|");
   const awayRe = awayNames.map(escapeRegExp).filter(Boolean).join("|");
   if (!homeRe || !awayRe) return null;
 
   const patterns = [
+    { key: "home", re: /PREDICTZ TIP[\s\S]{0,60}HOME WIN/i },
+    { key: "away", re: /PREDICTZ TIP[\s\S]{0,60}AWAY WIN/i },
+    { key: "draw", re: /PREDICTZ TIP[\s\S]{0,60}\bDRAW\b/i },
     { key: "home", re: new RegExp(`(?:best\\s*bet|prediction|verdict|tip|pick)\\s*[:：-]\\s*(?:home(?:\\s*win)?|1\\b|主胜|主队)`, "i") },
     { key: "away", re: new RegExp(`(?:best\\s*bet|prediction|verdict|tip|pick)\\s*[:：-]\\s*(?:away(?:\\s*win)?|2\\b|客胜|客队)`, "i") },
     { key: "draw", re: new RegExp(`(?:best\\s*bet|prediction|verdict|tip|pick)\\s*[:：-]\\s*(?:draw|x\\b|平局|平手)`, "i") },
@@ -690,17 +803,8 @@ function detectPickFromText(text, homeNames, awayNames) {
     }
   }
 
-  const homeP = matchPct(t, [/home(?:\s*win)?[^%]{0,16}?(\d{1,3})\s*%/i, /(\d{1,3})\s*%[^.]{0,12}home(?:\s*win)?/i]);
-  const drawP = matchPct(t, [/draw[^%]{0,16}?(\d{1,3})\s*%/i, /(\d{1,3})\s*%[^.]{0,12}draw/i]);
-  const awayP = matchPct(t, [/away(?:\s*win)?[^%]{0,16}?(\d{1,3})\s*%/i, /(\d{1,3})\s*%[^.]{0,12}away(?:\s*win)?/i]);
-  if (homeP != null || drawP != null || awayP != null) {
-    const vals = [
-      { key: "home", v: homeP ?? -1 },
-      { key: "draw", v: drawP ?? -1 },
-      { key: "away", v: awayP ?? -1 },
-    ].sort((a, b) => b.v - a.v);
-    if (vals[0].v >= 0) return vals[0].key;
-  }
+  const probs = extractMatchProbs(t);
+  if (probs) return pickOutcome(probs)?.key || null;
 
   return null;
 }
@@ -783,13 +887,17 @@ function extractTipSnippet(text, homeNames, awayNames) {
 async function searchWebTips(match) {
   const homeNames = teamSearchNames(match.home);
   const awayNames = teamSearchNames(match.away);
-  const homeEn = homeNames.find((n) => /[A-Za-z]/.test(n)) || homeNames[0];
-  const awayEn = awayNames.find((n) => /[A-Za-z]/.test(n)) || awayNames[0];
+  const homeEn =
+    [...homeNames].filter((n) => /[A-Za-zÄÖÅäöå]/.test(n)).sort((a, b) => b.length - a.length)[0] ||
+    homeNames[0];
+  const awayEn =
+    [...awayNames].filter((n) => /[A-Za-zÄÖÅäöå]/.test(n)).sort((a, b) => b.length - a.length)[0] ||
+    awayNames[0];
 
   const queries = [
-    `${homeEn} vs ${awayEn} prediction tip`,
-    `${homeEn} ${awayEn} forebet predictz`,
-    `${match.home} ${match.away} 预测 分析`,
+    ...PRIORITY_TIP_SITES.map((site) => `site:${site} ${homeEn} ${awayEn} prediction`),
+    `${homeEn} vs ${awayEn} prediction tip preview`,
+    `${match.home} ${match.away} 足球 预测`,
   ];
 
   const collected = [];
@@ -801,45 +909,68 @@ async function searchWebTips(match) {
 
   const dedup = new Map();
   for (const item of collected) {
+    if (isBlockedResult(item)) continue;
     const key = item.url.replace(/\/$/, "").toLowerCase();
     if (!dedup.has(key)) dedup.set(key, item);
+  }
+
+  // 若优先机构缺失，补一条更窄的站内检索
+  const hosts = [...dedup.values()].map((i) => hostOf(i.url));
+  for (const site of ["predictz.com", "windrawwin.com"]) {
+    if (hosts.some((h) => h.includes(site))) continue;
+    const md = await fetchViaJina(
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`site:${site} "${homeEn}" "${awayEn}"`)}`
+    );
+    for (const item of extractSearchResults(md)) {
+      if (isBlockedResult(item)) continue;
+      const key = item.url.replace(/\/$/, "").toLowerCase();
+      if (!dedup.has(key)) dedup.set(key, item);
+    }
   }
 
   return [...dedup.values()]
     .map((item) => ({ ...item, score: scoreResult(item, homeNames, awayNames) }))
     .filter((item) => item.score >= 10)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 8);
+    .slice(0, 10);
 }
 
-async function enrichTipPage(item, homeNames, awayNames) {
+async function enrichTipPage(item, homeNames, awayNames, match) {
   // 先按标题/URL 校验本场，禁止靠列表页正文“碰巧出现队名”蒙混过关
   if (!isMatchSpecificResult(item, homeNames, awayNames)) return null;
 
-  const page = await fetchViaJina(item.url, 12000);
-  const title = item.title.replace(/\*\*/g, "").trim();
-  const head = `${title}\n${item.snippet || ""}`;
-  const corpus = `${head}\n${page || ""}`;
+  const page = await fetchViaJina(item.url, 14000);
+  const rawTitle = item.title.replace(/\*\*/g, "").trim();
+  const corpus = `${rawTitle}\n${item.snippet || ""}\n${page || ""}`;
+  const host = hostOf(item.url);
 
-  const pickKey = detectPickFromText(corpus, homeNames, awayNames);
-  const pick = pickKey ? OUTCOMES.find((o) => o.key === pickKey) : null;
-  const pageTip = extractTipSnippet(page || "", homeNames, awayNames);
-  const fallbackTip = [item.snippet]
-    .map((s) => String(s || "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim())
-    .find((s) => isUsefulTipLine(s) && !isUselessTip(s, title));
+  let probs = extractMatchProbs(corpus);
+  let pickKey = detectPickFromText(corpus, homeNames, awayNames);
+  if (!pickKey && probs) pickKey = pickOutcome(probs)?.key || null;
 
-  let tipText = pageTip || fallbackTip || "";
-  if (isUselessTip(tipText, title)) {
-    if (pick) tipText = `倾向 ${pick.label}`;
-    else return null; // 无有效摘要也无倾向，直接丢弃（避免首页标题/时间戳）
+  const extras = host.includes("predictz.com") ? extractPredictZExtras(corpus) : [];
+  let tipText = formatChineseTip(pickKey, probs, extras);
+
+  // 仍无结构化观点时，尝试英文摘要再降级为中文倾向句
+  if (!tipText) {
+    const pageTip = extractTipSnippet(page || "", homeNames, awayNames);
+    if (pageTip && !isUselessTip(pageTip, rawTitle) && !isNoiseTipLine(pageTip)) {
+      tipText = pickKey
+        ? `倾向${OUTCOMES.find((o) => o.key === pickKey)?.label || "参考"}。原文要点：${pageTip.slice(0, 100)}`
+        : `原文要点：${pageTip.slice(0, 120)}`;
+    }
   }
 
+  if (!tipText || !pickKey) return null;
+
+  const pick = OUTCOMES.find((o) => o.key === pickKey);
   return {
     name: sourceLabel(item.url),
     url: item.url,
-    title,
-    tipText: tipText.slice(0, 180),
-    pick: pick ? { ...pick, prob: null } : null,
+    title: `${match.home}对阵${match.away} · 预测观点`,
+    tipText: tipText.slice(0, 200),
+    pick: pick ? { ...pick, prob: probs?.[pickKey] ?? null } : null,
+    probs,
     trusted: isTrustedHost(item.url),
   };
 }
@@ -893,22 +1024,31 @@ export async function fetchWebPredictions(match) {
     };
   }
 
-  // 同站点只保留一条，优先可信源
+  // 同站点只保留一条，优先可信源 / 高分
   const byHost = new Map();
-  for (const item of results) {
+  for (const item of results.sort((a, b) => b.score - a.score)) {
     const host = hostOf(item.url) || item.url;
     if (!byHost.has(host)) byHost.set(host, item);
   }
-  const top = [...byHost.values()].slice(0, 5);
-  const enriched = await Promise.all(top.map((item) => enrichTipPage(item, homeNames, awayNames)));
-  const sources = enriched.filter(
-    (s) =>
-      s &&
-      s.tipText &&
-      !isUselessTip(s.tipText, s.title) &&
-      !/体育书|必胜\s*\|/.test(s.tipText) &&
-      (s.pick || teamHitCount(`${s.title} ${s.tipText}`, homeNames, awayNames) >= 1)
+  // 多取几家再富化，最终保留有中文观点的 5 条
+  const preferred = PRIORITY_TIP_SITES.map((h) =>
+    [...byHost.entries()].find(([host]) => host.includes(h))?.[1]
+  ).filter(Boolean);
+  const rest = [...byHost.values()].filter((item) => !preferred.includes(item));
+  const top = [...preferred, ...rest].slice(0, 8);
+  const enriched = await Promise.all(
+    top.map((item) => enrichTipPage(item, homeNames, awayNames, match))
   );
+  const sources = enriched
+    .filter(
+      (s) =>
+        s &&
+        s.pick &&
+        s.tipText &&
+        !isUselessTip(s.tipText, s.title) &&
+        !/体育书|必胜\s*\||^\d{4}-\d{2}-\d{2}/.test(s.tipText)
+    )
+    .slice(0, 5);
   return {
     consensus: buildConsensus(sources),
     sources,
@@ -1042,18 +1182,18 @@ export function webSourcesHtml(sources = []) {
   return sources
     .map((src) => {
       const pickBadge = src.pick
-        ? `<span class="prediction-source-pick prediction-source-pick--${outcomeClass(src.pick.key)}">${src.pick.short}</span>`
-        : `<span class="prediction-source-pick prediction-source-pick--pending">观点</span>`;
+        ? `<span class="prediction-source-pick prediction-source-pick--${outcomeClass(src.pick.key)}">${src.pick.label || src.pick.short}</span>`
+        : `<span class="prediction-source-pick prediction-source-pick--pending">待定</span>`;
       return `
       <div class="prediction-source-card">
         <div class="prediction-source-header">
           <div>
             <div class="prediction-source-name">${src.name}</div>
-            <div class="prediction-source-tag">${src.title || "机构预测摘要"}</div>
+            <div class="prediction-source-tag">${src.title || "机构预测观点"}</div>
           </div>
           ${pickBadge}
         </div>
-        <p class="prediction-tip-text">${src.tipText || "暂无明确观点摘要"}</p>
+        <p class="prediction-tip-text">${src.tipText || "暂无明确中文观点"}</p>
       </div>`;
     })
     .join("");
