@@ -108,7 +108,7 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-secondary);
   cursor: pointer;
   transition: color 0.2s;
@@ -174,6 +174,10 @@ html, body {
 }
 
 .section-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
@@ -184,6 +188,63 @@ html, body {
 
 .section-label:first-child {
   margin-top: 0;
+}
+
+.section-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.history-toolbar-note {
+  margin: 8px 2px 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.history-result-card {
+  opacity: 1;
+}
+
+.history-result-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.history-outcome {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.history-outcome--win {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.history-outcome--draw {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.history-outcome--loss {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.history-outcome--pending {
+  background: var(--surface-2, #f3f4f6);
+  color: var(--text-secondary);
+}
+
+.history-score-text {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.04em;
 }
 
 .section-label--round {
@@ -2035,6 +2096,61 @@ html, body {
 .prob-label {
   font-size: 12px;
   font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.prob-label--wide {
+  width: auto;
+  min-width: 64px;
+  font-size: 11px;
+}
+
+.score-prob-bars .prob-row {
+  grid-template-columns: 64px 1fr 36px;
+}
+
+.prob-fill--over { background: #ea580c; }
+.prob-fill--big { background: #c026d3; }
+.prob-fill--btts { background: #0891b2; }
+.prob-fill--blowout { background: #7c3aed; }
+
+.prediction-score-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px 16px;
+  margin-bottom: 12px;
+}
+
+.score-outlook-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.score-outlook-lean {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.score-outlook-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.score-outlook-note {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.45;
   color: var(--text-secondary);
 }
 

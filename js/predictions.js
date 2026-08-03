@@ -94,7 +94,7 @@ const PRIORITY_TIP_SITES = [
 
 const cache = new Map();
 /** 预测结果结构版本；变更后自动丢弃旧缓存（避免串场摘要残留） */
-export const ANALYSIS_SCHEMA = 8;
+export const ANALYSIS_SCHEMA = 9;
 
 /** 赔率/资讯站，不做预测摘要 */
 const BLOCKED_HOSTS = [
@@ -673,6 +673,59 @@ function extractPredictZExtras(text) {
   return extras;
 }
 
+/** 从机构页提取大球/双方进球等进球盘倾向 */
+function extractGoalsMarkets(text) {
+  const t = String(text || "");
+  if (!t) return null;
+  const goals = {};
+
+  const over25 = matchPct(t, [
+    /Over\s*2\.5(?:\s*Goals?)?[^%]{0,28}(\d{1,2}(?:\.\d+)?)\s*%/i,
+    /(\d{1,2}(?:\.\d+)?)\s*%[^.\n]{0,36}Over\s*2\.5/i,
+  ]);
+  const under25 = matchPct(t, [
+    /Under\s*2\.5(?:\s*Goals?)?[^%]{0,28}(\d{1,2}(?:\.\d+)?)\s*%/i,
+    /(\d{1,2}(?:\.\d+)?)\s*%[^.\n]{0,36}Under\s*2\.5/i,
+  ]);
+  if (over25 != null) goals.over25 = over25 / 100;
+  if (under25 != null) goals.under25 = under25 / 100;
+
+  const over35 = matchPct(t, [
+    /Over\s*3\.5(?:\s*Goals?)?[^%]{0,28}(\d{1,2}(?:\.\d+)?)\s*%/i,
+    /(\d{1,2}(?:\.\d+)?)\s*%[^.\n]{0,36}Over\s*3\.5/i,
+  ]);
+  if (over35 != null) goals.over35 = over35 / 100;
+
+  if (/PREDICTZ TIP[\s\S]{0,220}Over\s*2\.5\s*Goals/i.test(t) || /\bTip\s*[:：].{0,40}Over\s*2\.5/i.test(t)) {
+    goals.over25Lean = true;
+  }
+  if (/PREDICTZ TIP[\s\S]{0,220}Under\s*2\.5\s*Goals/i.test(t) || /\bTip\s*[:：].{0,40}Under\s*2\.5/i.test(t)) {
+    goals.under25Lean = true;
+  }
+  if (/Both Teams To Score\s*[-–:]\s*Yes|BTTS\s*Yes/i.test(t)) goals.bttsYes = true;
+  if (/Both Teams To Score\s*[-–:]\s*No|BTTS\s*No/i.test(t)) goals.bttsNo = true;
+
+  const avg = t.match(/Average goals?\s*[:：]?\s*(\d+(?:\.\d+)?)/i);
+  if (avg) {
+    const n = Number(avg[1]);
+    if (Number.isFinite(n) && n > 0 && n < 8) goals.avgGoals = n;
+  }
+
+  return Object.keys(goals).length ? goals : null;
+}
+
+function goalsExtrasFromMarkets(goals) {
+  if (!goals) return [];
+  const extras = [];
+  if (goals.over25 != null) extras.push(`大球约 ${Math.round(goals.over25 * 100)}%`);
+  else if (goals.over25Lean) extras.push("倾向大球");
+  if (goals.under25Lean && !goals.over25Lean) extras.push("倾向小球");
+  if (goals.over35 != null) extras.push(`大比分(3.5)约 ${Math.round(goals.over35 * 100)}%`);
+  if (goals.bttsYes) extras.push("双方都有进球");
+  if (goals.bttsNo) extras.push("不会都进球");
+  return extras;
+}
+
 function formatChineseTip(pickKey, probs, extras = []) {
   const outcome = OUTCOMES.find((o) => o.key === pickKey);
   if (!outcome && !probs) return "";
@@ -687,7 +740,7 @@ function formatChineseTip(pickKey, probs, extras = []) {
       `概率：主胜 ${Math.round(probs.home * 100)}% / 平局 ${Math.round(probs.draw * 100)}% / 主负 ${Math.round(probs.away * 100)}%`
     );
   }
-  if (extras.length) parts.push(extras.slice(0, 2).join("，"));
+  if (extras.length) parts.push(extras.slice(0, 3).join("，"));
   return parts.join("。");
 }
 
@@ -855,8 +908,14 @@ function buildTipFromCorpus(corpus, homeNames, awayNames, match, url, rawTitle) 
   let pickKey = detectPickFromText(corpus, homeNames, awayNames);
   if (!pickKey && probs) pickKey = pickOutcome(probs)?.key || null;
 
-  const extras = host.includes("predictz.com") ? extractPredictZExtras(corpus) : [];
-  let tipText = formatChineseTip(pickKey, probs, extras);
+  const goals = extractGoalsMarkets(corpus);
+  const extras = [
+    ...(host.includes("predictz.com") ? extractPredictZExtras(corpus) : []),
+    ...goalsExtrasFromMarkets(goals),
+  ];
+  // 去重
+  const uniqExtras = [...new Set(extras)];
+  let tipText = formatChineseTip(pickKey, probs, uniqExtras);
 
   if (!tipText && pickKey) {
     tipText = `倾向${OUTCOMES.find((o) => o.key === pickKey)?.label || "参考"}`;
@@ -868,9 +927,10 @@ function buildTipFromCorpus(corpus, homeNames, awayNames, match, url, rawTitle) 
     name: sourceLabel(url),
     url,
     title: `${match.home}对阵${match.away} · 预测观点`,
-    tipText: tipText.slice(0, 200),
+    tipText: tipText.slice(0, 220),
     pick: pick ? { ...pick, prob: probs?.[pickKey] ?? null } : null,
     probs,
+    goals,
     trusted: isTrustedHost(url),
   };
 }
@@ -891,6 +951,56 @@ async function enrichTipPage(item, homeNames, awayNames, match) {
   return buildTipFromCorpus(`${head}\n${page || ""}`, homeNames, awayNames, match, item.url, rawTitle);
 }
 
+function buildGoalsConsensus(sources) {
+  let overLean = 0;
+  let underLean = 0;
+  let bttsYes = 0;
+  let bttsNo = 0;
+  let overSum = 0;
+  let overN = 0;
+  let over35Sum = 0;
+  let over35N = 0;
+  let avgSum = 0;
+  let avgN = 0;
+
+  for (const s of sources || []) {
+    const g = s.goals;
+    if (!g) continue;
+    if (g.over25 != null) {
+      overSum += g.over25;
+      overN += 1;
+      if (g.over25 >= 0.5) overLean += 1;
+      else underLean += 1;
+    } else if (g.over25Lean) overLean += 1;
+    else if (g.under25Lean) underLean += 1;
+
+    if (g.over35 != null) {
+      over35Sum += g.over35;
+      over35N += 1;
+    }
+    if (g.bttsYes) bttsYes += 1;
+    if (g.bttsNo) bttsNo += 1;
+    if (g.avgGoals != null) {
+      avgSum += g.avgGoals;
+      avgN += 1;
+    }
+  }
+
+  const leanTotal = overLean + underLean;
+  const bttsTotal = bttsYes + bttsNo;
+  if (!leanTotal && !overN && !over35N && !bttsTotal && !avgN) return null;
+
+  return {
+    over25: overN ? overSum / overN : leanTotal ? overLean / leanTotal : null,
+    over35: over35N ? over35Sum / over35N : null,
+    btts: bttsTotal ? bttsYes / bttsTotal : null,
+    avgGoals: avgN ? avgSum / avgN : null,
+    overLean,
+    underLean,
+    counted: Math.max(leanTotal, overN, over35N, bttsTotal, avgN),
+  };
+}
+
 function buildConsensus(sources) {
   const votes = { home: 0, draw: 0, away: 0 };
   let counted = 0;
@@ -899,6 +1009,8 @@ function buildConsensus(sources) {
     votes[s.pick.key] += 1;
     counted += 1;
   }
+  const goals = buildGoalsConsensus(sources);
+
   if (!counted) {
     return {
       name: "全网机构观点",
@@ -906,6 +1018,7 @@ function buildConsensus(sources) {
       pick: null,
       probs: null,
       counted: 0,
+      goals,
       bullets: ["暂未解析到明确倾向，请查看下方各机构摘要"],
     };
   }
@@ -916,16 +1029,24 @@ function buildConsensus(sources) {
     away: votes.away / counted,
   };
   const pick = pickOutcome(probs);
+  const bullets = [
+    `多数倾向：${pick.label}（${votes[pick.key]}/${counted} 家）`,
+    `分布：主胜 ${votes.home} · 平局 ${votes.draw} · 主负 ${votes.away}`,
+  ];
+  if (goals?.over25 != null) {
+    bullets.push(`机构大球倾向约 ${Math.round(goals.over25 * 100)}%`);
+  } else if (goals?.overLean || goals?.underLean) {
+    bullets.push(`进球盘：大球 ${goals.overLean} · 小球 ${goals.underLean}`);
+  }
+
   return {
     name: "全网机构观点",
     tagline: `已聚合 ${counted} 家有效倾向`,
     pick,
     probs,
     counted,
-    bullets: [
-      `多数倾向：${pick.label}（${votes[pick.key]}/${counted} 家）`,
-      `分布：主胜 ${votes.home} · 平局 ${votes.draw} · 主负 ${votes.away}`,
-    ],
+    goals,
+    bullets,
   };
 }
 

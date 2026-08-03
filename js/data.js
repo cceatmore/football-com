@@ -5,11 +5,17 @@ const LOCAL_DATA_URL = new URL("../data/lottery.json", import.meta.url).href;
 const UPSTREAM_URL =
   "https://webapi.sporttery.cn/gateway/jc/football/getMatchCalculatorV1.qry?poolCode=hhad,had&channel=c";
 
-const RESULT_URL = (begin, end) =>
-  `https://webapi.sporttery.cn/gateway/jc/football/getMatchResultV1.qry?matchPage=1&pcOrWap=1&leagueId=&matchBeginDate=${begin}&matchEndDate=${end}`;
+const RESULT_URL = (begin, end, page = 1) =>
+  `https://webapi.sporttery.cn/gateway/jc/football/getMatchResultV1.qry?matchPage=${page}&pcOrWap=1&leagueId=&matchBeginDate=${begin}&matchEndDate=${end}`;
 
 const FETCH_HEADERS = {
   Referer: "https://m.sporttery.cn/mjc/jsq/zqspf/",
+  Accept: "application/json, text/plain, */*",
+};
+
+const RESULT_HEADERS = {
+  Referer: "https://www.sporttery.cn/jc/zqsgkj/",
+  Origin: "https://www.sporttery.cn",
   Accept: "application/json, text/plain, */*",
 };
 
@@ -217,11 +223,11 @@ async function loadBundledRaw() {
   return raw;
 }
 
-async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
+async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS, headers = FETCH_HEADERS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { cache: "no-cache", signal: controller.signal, headers: FETCH_HEADERS });
+    const res = await fetch(url, { cache: "no-cache", signal: controller.signal, headers });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -247,14 +253,61 @@ async function fetchUpstreamMatches() {
   };
 }
 
-async function fetchRecentResults(businessDate) {
+function shiftBeijingDate(dateKey, deltaDays) {
+  const [y, mo, d] = String(dateKey).split("-").map(Number);
+  const utc = new Date(Date.UTC(y, mo - 1, d));
+  utc.setUTCDate(utc.getUTCDate() + deltaDays);
+  return utc.toISOString().slice(0, 10);
+}
+
+/** 拉取体彩竞彩开奖赛果（默认近 30 天，多页） */
+async function fetchRecentResults(businessDate, { days = 30, maxPages = 6 } = {}) {
   const end = businessDate || beijingDateKey(new Date());
-  const startDate = new Date(end);
-  startDate.setDate(startDate.getDate() - 30);
-  const begin = startDate.toISOString().slice(0, 10);
-  const data = await fetchJson(RESULT_URL(begin, end));
-  if (!data?.success || !data.value?.matchResultList) return [];
-  return data.value.matchResultList.map(normalizeResult);
+  const begin = shiftBeijingDate(end, -Math.max(1, days));
+  const all = [];
+  const seen = new Set();
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const data = await fetchJson(RESULT_URL(begin, end, page), FETCH_TIMEOUT_MS, RESULT_HEADERS);
+    const list = data?.success ? data.value?.matchResultList || [] : [];
+    if (!list.length) break;
+    for (const raw of list) {
+      const m = normalizeResult(raw);
+      if (m?.id == null || seen.has(m.id)) continue;
+      seen.add(m.id);
+      all.push(m);
+    }
+    // 单页不足常见页量时认为已到末页
+    if (list.length < 30) break;
+  }
+
+  return all;
+}
+
+/** 导出：已完场的体彩开盘对局（时间新→旧） */
+export function getFinishedLotteryMatches(allMatches = [], history = []) {
+  const map = new Map();
+  for (const m of [...history, ...allMatches]) {
+    if (!m?.finished || m.id == null) continue;
+    map.set(m.id, m);
+  }
+  return sortMatchesByTime([...map.values()]).reverse();
+}
+
+/** 按「距今过去 N 天」筛选已完场（用于历史赛况 Tab） */
+export function filterPastDays(matches, days, fromDate = new Date()) {
+  if (days === "all") return matches;
+  const endMs = fromDate.getTime() + 12 * 60 * 60 * 1000;
+  const startMs = fromDate.getTime() - Number(days) * 24 * 60 * 60 * 1000;
+  return matches.filter((m) => {
+    let t;
+    if (m.utc) t = new Date(m.utc).getTime();
+    else {
+      const d = parseDateKey(m.beijingDateKey || m.date);
+      t = d.getTime();
+    }
+    return Number.isFinite(t) && t >= startMs && t <= endMs;
+  });
 }
 
 export async function getBundledLotteryData() {

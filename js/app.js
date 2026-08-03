@@ -3,7 +3,9 @@ import {
   fetchLatestLotteryData,
   startAutoDataRefresh,
   filterByDays,
+  filterPastDays,
   sortMatchesByTime,
+  getFinishedLotteryMatches,
   getTeamMatches,
   formatMatchupHtml,
   formatDateSectionLabel,
@@ -40,6 +42,7 @@ import { fetchStandingsForMatches, clearLeagueStandingsCache } from "./leagueSta
 const state = {
   tab: "schedule",
   dayFilter: "all",
+  historyDayFilter: "7",
   standingsExpandedTeam: null,
   standingsLeagueTab: null,
   standingsGroups: null,
@@ -71,6 +74,7 @@ const els = {
 
 const TAB_TITLES = {
   schedule: { title: "今日赛程", sub: "体彩竞彩足球 · 北京时间" },
+  history: { title: "历史赛况", sub: "体彩开盘对局 · 赛果开奖" },
   standings: { title: "联赛积分", sub: "官方排名 / 赛果统计" },
   predictions: { title: "预测分析", sub: "全网机构预测 · 仅供参考" },
 };
@@ -80,6 +84,14 @@ const DAY_FILTERS = [
   { id: "1", label: "1 天" },
   { id: "2", label: "2 天" },
   { id: "3", label: "3 天" },
+];
+
+const HISTORY_DAY_FILTERS = [
+  { id: "3", label: "3 天" },
+  { id: "7", label: "7 天" },
+  { id: "15", label: "15 天" },
+  { id: "30", label: "30 天" },
+  { id: "all", label: "全部" },
 ];
 
 init();
@@ -177,7 +189,7 @@ function bindEvents() {
   window.addEventListener("resize", () => {
     clearTimeout(marqueeResizeTimer);
     marqueeResizeTimer = setTimeout(() => {
-      if (state.tab === "schedule") setupTeamNameMarquee(els.main);
+      if (state.tab === "schedule" || state.tab === "history") setupTeamNameMarquee(els.main);
     }, 150);
   });
 }
@@ -198,17 +210,20 @@ function renderLoading() {
 function render() {
   updateTabs();
   if (state.tab === "schedule") renderSchedule();
+  else if (state.tab === "history") renderHistory();
   else if (state.tab === "standings") renderStandings();
   else renderPredictions();
 }
 
-function renderFilterBar(current) {
+function renderFilterBar(current, filters = DAY_FILTERS) {
   return `
     <div class="filter-bar">
-      ${DAY_FILTERS.map(
-        (f) =>
-          `<button class="chip ${current === f.id ? "active" : ""}" data-days="${f.id}" type="button">${f.label}</button>`
-      ).join("")}
+      ${filters
+        .map(
+          (f) =>
+            `<button class="chip ${current === f.id ? "active" : ""}" data-days="${f.id}" type="button">${f.label}</button>`
+        )
+        .join("")}
     </div>
   `;
 }
@@ -248,6 +263,77 @@ function renderSchedule() {
 
 function renderScheduleToolbar(currentFilter) {
   return `<div class="schedule-toolbar">${renderFilterBar(currentFilter)}</div>`;
+}
+
+function historyOutcomeMeta(match) {
+  if (!match?.finished || match.homeScore == null || match.awayScore == null) {
+    return { label: "待定", cls: "pending" };
+  }
+  if (match.homeScore > match.awayScore) return { label: "主胜", cls: "win" };
+  if (match.homeScore < match.awayScore) return { label: "主负", cls: "loss" };
+  return { label: "平局", cls: "draw" };
+}
+
+function historyMatchCardHtml(m) {
+  const outcome = historyOutcomeMeta(m);
+  const roundLabel = m.leagueShort || m.round || m.group;
+  return `
+    <article class="match-card finished history-result-card" data-match-id="${m.id}">
+      <div class="match-card-line">
+        <span class="group-badge" style="background:#${m.leagueColor || "64748b"}">${roundLabel}</span>
+        ${teamInline(m.home, m.homeScore, "home", m, false)}
+        <span class="match-vs">VS</span>
+        ${teamInline(m.away, m.awayScore, "away", m, false)}
+        <span class="match-time">${m.beijingTime || "—"}</span>
+      </div>
+      <div class="match-meta history-result-meta">
+        ${m.num ? `<span class="match-num">${m.num}</span>` : ""}
+        <span class="history-outcome history-outcome--${outcome.cls}">${outcome.label}</span>
+        <span class="history-score-text">${m.homeScore}:${m.awayScore}</span>
+        ${m.odds ? `<span class="match-odds">${formatOddsShort(m.odds)}</span>` : ""}
+      </div>
+    </article>`;
+}
+
+function renderHistory() {
+  const finished = getFinishedLotteryMatches(state.allMatches, state.history);
+  const filtered = filterPastDays(finished, state.historyDayFilter);
+  // 日期分组保持新→旧：先按日期 key 倒序
+  const groups = groupMatchesByDate(filtered).sort((a, b) => {
+    const ka = a.items[0]?.beijingDateKey || a.items[0]?.date || "";
+    const kb = b.items[0]?.beijingDateKey || b.items[0]?.date || "";
+    return String(kb).localeCompare(String(ka));
+  });
+
+  const html = [
+    `<div class="schedule-toolbar">
+      ${renderFilterBar(state.historyDayFilter, HISTORY_DAY_FILTERS)}
+      <p class="history-toolbar-note">中国体彩竞彩开盘场次 · 已完赛 ${filtered.length} 场</p>
+    </div>`,
+    filtered.length
+      ? groups
+          .map(
+            ({ label, items }) => `
+        <div class="section-label">${label}<span class="section-count">${items.length} 场</span></div>
+        ${items
+          .slice()
+          .sort((a, b) => {
+            const ta = a.utc ? new Date(a.utc).getTime() : 0;
+            const tb = b.utc ? new Date(b.utc).getTime() : 0;
+            return tb - ta;
+          })
+          .map((m) => historyMatchCardHtml(m))
+          .join("")}`
+          )
+          .join("")
+      : `<div class="empty-state"><div class="icon">📋</div><p>当前范围暂无体彩赛果</p><p class="detail-note">将展示竞彩开盘并对阵已完赛的场次</p></div>`,
+    dataSourceNote(),
+  ].join("");
+
+  els.main.innerHTML = html;
+  bindFilterBar(els.main, "historyDayFilter");
+  bindMatchCards(els.main);
+  scheduleTeamNameMarquee(els.main);
 }
 
 function groupMatchesByDate(matches) {
@@ -716,6 +802,140 @@ function predictionFormCardHtml(match, form) {
     </div>`;
 }
 
+function teamGoalsStats(matches, team) {
+  const rows = [];
+  for (const m of matches || []) {
+    if (!m?.finished || m.homeScore == null || m.awayScore == null) continue;
+    const resolved = resolveTeamInMatch(m, team);
+    if (!resolved) continue;
+    const isHome = resolved === m.home;
+    const gf = isHome ? Number(m.homeScore) : Number(m.awayScore);
+    const ga = isHome ? Number(m.awayScore) : Number(m.homeScore);
+    if (!Number.isFinite(gf) || !Number.isFinite(ga)) continue;
+    rows.push({
+      gf,
+      ga,
+      total: Number(m.homeScore) + Number(m.awayScore),
+      margin: Math.abs(Number(m.homeScore) - Number(m.awayScore)),
+      btts: Number(m.homeScore) > 0 && Number(m.awayScore) > 0,
+    });
+  }
+  const n = rows.length;
+  if (!n) return null;
+  const sum = (fn) => rows.reduce((a, r) => a + fn(r), 0);
+  return {
+    n,
+    avgFor: sum((r) => r.gf) / n,
+    avgAgainst: sum((r) => r.ga) / n,
+    avgTotal: sum((r) => r.total) / n,
+    over25Rate: sum((r) => (r.total >= 3 ? 1 : 0)) / n,
+    bigScoreRate: sum((r) => (r.total >= 4 ? 1 : 0)) / n,
+    blowoutRate: sum((r) => (r.margin >= 2 ? 1 : 0)) / n,
+    bttsRate: sum((r) => (r.btts ? 1 : 0)) / n,
+  };
+}
+
+function blendRate(formRate, webRate, formWeight = 0.6) {
+  if (formRate == null && webRate == null) return null;
+  if (formRate == null) return webRate;
+  if (webRate == null) return formRate;
+  return formRate * formWeight + webRate * (1 - formWeight);
+}
+
+function buildScoreOutlook(match, form, webGoals = null) {
+  if (!form || form.pending) return { pending: true };
+  const home = teamGoalsStats(form.home, match.home);
+  const away = teamGoalsStats(form.away, match.away);
+  if (!home && !away && !webGoals) return null;
+
+  const avg = (a, b) => {
+    if (a == null) return b;
+    if (b == null) return a;
+    return (a + b) / 2;
+  };
+
+  const expected =
+    webGoals?.avgGoals != null
+      ? webGoals.avgGoals * 0.45 + avg(home?.avgTotal, away?.avgTotal) * 0.55
+      : avg(home?.avgTotal, away?.avgTotal);
+
+  const over25 = blendRate(avg(home?.over25Rate, away?.over25Rate), webGoals?.over25);
+  const bigScore = blendRate(avg(home?.bigScoreRate, away?.bigScoreRate), webGoals?.over35);
+  const btts = blendRate(avg(home?.bttsRate, away?.bttsRate), webGoals?.btts);
+  const blowout = avg(home?.blowoutRate, away?.blowoutRate);
+
+  let lean = "进球走势一般";
+  if ((bigScore != null && bigScore >= 0.42) || (expected != null && expected >= 3.3)) lean = "偏大比分";
+  else if ((over25 != null && over25 >= 0.58) || (expected != null && expected >= 2.7)) lean = "偏大球";
+  else if ((over25 != null && over25 <= 0.42) || (expected != null && expected <= 2.2)) lean = "偏小球";
+
+  return {
+    pending: false,
+    lean,
+    expected,
+    over25,
+    bigScore,
+    btts,
+    blowout,
+    home,
+    away,
+  };
+}
+
+function scoreProbRowHtml(label, value, tone = "goals") {
+  if (value == null) return "";
+  const pctVal = Math.round(value * 100);
+  return `
+    <div class="prob-row">
+      <span class="prob-label prob-label--wide">${label}</span>
+      <div class="prob-track"><div class="prob-fill prob-fill--${tone}" style="width:${pctVal}%"></div></div>
+      <span class="prob-val">${pctVal}%</span>
+    </div>`;
+}
+
+function predictionScoreCardHtml(match, outlook) {
+  if (!outlook) return "";
+  if (outlook.pending) {
+    return `
+      <div class="prediction-score-card">
+        <div class="prediction-form-card-head">
+          <div class="prediction-source-name">大比分 / 进球倾向</div>
+          <div class="prediction-source-tag">正在根据近况估算…</div>
+        </div>
+      </div>`;
+  }
+
+  const homeLine = outlook.home
+    ? `${teamLabel(match.home)}场均进 ${outlook.home.avgFor.toFixed(1)} / 失 ${outlook.home.avgAgainst.toFixed(1)}`
+    : "";
+  const awayLine = outlook.away
+    ? `${teamLabel(match.away)}场均进 ${outlook.away.avgFor.toFixed(1)} / 失 ${outlook.away.avgAgainst.toFixed(1)}`
+    : "";
+  const expectedText =
+    outlook.expected != null ? `预期总进球约 ${outlook.expected.toFixed(1)}` : "预期总进球暂缺";
+
+  return `
+    <div class="prediction-score-card">
+      <div class="prediction-form-card-head">
+        <div class="prediction-source-name">大比分 / 进球倾向</div>
+        <div class="prediction-source-tag">近 10 场进球结构 + 机构大球观点</div>
+      </div>
+      <div class="score-outlook-banner">
+        <span class="score-outlook-lean">${outlook.lean}</span>
+        <span class="score-outlook-meta">${expectedText}</span>
+      </div>
+      <div class="prob-bars score-prob-bars">
+        ${scoreProbRowHtml("大球≥3", outlook.over25, "over")}
+        ${scoreProbRowHtml("大比分≥4", outlook.bigScore, "big")}
+        ${scoreProbRowHtml("双方进球", outlook.btts, "btts")}
+        ${scoreProbRowHtml("净胜2+", outlook.blowout, "blowout")}
+      </div>
+      <div class="score-outlook-note">
+        ${[homeLine, awayLine].filter(Boolean).join(" · ") || "暂无足够进球赛果样本"}
+      </div>
+    </div>`;
+}
+
 async function loadPredictionForm(match) {
   const local = state.allMatches || [];
   const [home, away] = await Promise.all([
@@ -791,6 +1011,7 @@ async function openPredictionDetail(match) {
 function predictionDetailHtml(match, analysis) {
   const consensus = analysis.consensus || analysis.summary || {};
   const pick = consensus.pick;
+  const scoreOutlook = buildScoreOutlook(match, analysis.form, consensus.goals);
 
   return `
     <div class="detail-card prediction-summary-card">
@@ -814,13 +1035,14 @@ function predictionDetailHtml(match, analysis) {
     </div>
 
     ${predictionFormCardHtml(match, analysis.form)}
+    ${predictionScoreCardHtml(match, scoreOutlook)}
 
     <div class="prediction-section-title">各家观点摘要</div>
     ${webSourcesHtml(analysis.sources || [])}
 
     ${injuryReportHtml(analysis.injury, match, { pending: !!analysis.injuryPending })}
 
-    <p class="predictions-disclaimer">预测为公开网页检索后的机构观点摘要，伤停仅统计缺阵位置与人数。内容仅供参考，请理性看球。</p>
+    <p class="predictions-disclaimer">预测为公开网页检索后的机构观点摘要；大比分结合近况进球与机构大球观点估算，仅供参考。</p>
   `;
 }
 

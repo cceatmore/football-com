@@ -145,17 +145,34 @@ async function fetchUpstream() {
   return data;
 }
 
-async function fetchResults(begin, end) {
-  const url = `https://webapi.sporttery.cn/gateway/jc/football/getMatchResultV1.qry?matchPage=1&pcOrWap=1&leagueId=&matchBeginDate=${begin}&matchEndDate=${end}`;
+async function fetchResults(begin, end, maxPages = 6) {
+  const headers = {
+    ...HEADERS,
+    Referer: "https://www.sporttery.cn/jc/zqsgkj/",
+    Origin: "https://www.sporttery.cn",
+  };
+  const all = [];
+  const seen = new Set();
   try {
-    const res = await fetch(url, { headers: HEADERS });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (!data.success || !data.value?.matchResultList) return [];
-    return data.value.matchResultList.map(normalizeResult);
+    for (let page = 1; page <= maxPages; page += 1) {
+      const url = `https://webapi.sporttery.cn/gateway/jc/football/getMatchResultV1.qry?matchPage=${page}&pcOrWap=1&leagueId=&matchBeginDate=${begin}&matchEndDate=${end}`;
+      const res = await fetch(url, { headers });
+      if (!res.ok) break;
+      const data = await res.json();
+      const list = data?.success ? data.value?.matchResultList || [] : [];
+      if (!list.length) break;
+      for (const raw of list) {
+        const m = normalizeResult(raw);
+        if (m?.id == null || seen.has(m.id)) continue;
+        seen.add(m.id);
+        all.push(m);
+      }
+      if (list.length < 30) break;
+    }
   } catch {
-    return [];
+    /* keep what we have */
   }
+  return all;
 }
 
 function loadExisting() {
