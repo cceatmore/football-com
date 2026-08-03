@@ -225,37 +225,40 @@ function findBridgeMatchId(histories, team) {
 /**
  * 拉取球队近期对局：优先用相关场次 matchId，必要时经桥接场次再取。
  */
-export async function fetchTeamRecentForm(team, { matchId = null, bridgeMatchId = null, localMatches = [] } = {}) {
-  const local = collectLocalTeamMatches(localMatches, team);
+export async function fetchTeamRecentForm(
+  team,
+  { matchId = null, bridgeMatchId = null, localMatches = [], limit = RECENT_MATCH_LIMIT } = {}
+) {
+  const local = collectLocalTeamMatches(localMatches, team, limit);
 
   const tryMatchId = async (id) => {
     if (id == null) return null;
-    const histories = await fetchTeamHistories(id);
+    const histories = await fetchTeamHistories(id, Math.max(limit, RECENT_MATCH_LIMIT));
     const side = historiesSideForTeam(histories, team);
     if (!side) return { histories, matches: null };
     return {
       histories,
-      matches: getTeamHistoryList(histories, side, local, team),
+      matches: getTeamHistoryList(histories, side, local, team, null, limit),
     };
   };
 
   let result = await tryMatchId(matchId);
-  if (result?.matches?.length) return result.matches;
+  if (result?.matches?.length) return result.matches.slice(0, limit);
 
   if (bridgeMatchId && bridgeMatchId !== matchId) {
     result = await tryMatchId(bridgeMatchId);
-    if (result?.matches?.length) return result.matches;
+    if (result?.matches?.length) return result.matches.slice(0, limit);
 
     const bridgedId = findBridgeMatchId(result?.histories, team);
     if (bridgedId && bridgedId !== bridgeMatchId && bridgedId !== matchId) {
       const bridged = await tryMatchId(bridgedId);
-      if (bridged?.matches?.length) return bridged.matches;
+      if (bridged?.matches?.length) return bridged.matches.slice(0, limit);
     }
   } else if (result?.histories) {
     const bridgedId = findBridgeMatchId(result.histories, team);
     if (bridgedId && bridgedId !== matchId) {
       const bridged = await tryMatchId(bridgedId);
-      if (bridged?.matches?.length) return bridged.matches;
+      if (bridged?.matches?.length) return bridged.matches.slice(0, limit);
     }
   }
 

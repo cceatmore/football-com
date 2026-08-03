@@ -1067,13 +1067,18 @@ function standingsMatchItemHtml(match, team) {
     </div>`;
 }
 
+const STANDINGS_RECENT_LIMIT = 5;
+
 function standingsTeamMatchesHtml(team) {
   if (state.standingsTeamLoading === team) {
-    return `<div class="loading loading--inline"><div class="spinner"></div><span>加载对局记录…</span></div>`;
+    return `<div class="loading loading--inline"><div class="spinner"></div><span>加载近 ${STANDINGS_RECENT_LIMIT} 场…</span></div>`;
   }
 
   const cached = state.standingsTeamMatches.get(team);
-  const matches = cached || collectLocalTeamMatches(state.allMatches, team);
+  const matches = (cached || collectLocalTeamMatches(state.allMatches, team, STANDINGS_RECENT_LIMIT)).slice(
+    0,
+    STANDINGS_RECENT_LIMIT
+  );
   if (!matches.length) {
     return '<p class="standings-matches-empty">暂无比赛记录</p>';
   }
@@ -1112,12 +1117,16 @@ async function loadStandingsTeamMatches(team, group) {
       matchId: metaMatch?.id ?? null,
       bridgeMatchId: findStandingsAnchorMatchId(group),
       localMatches: state.allMatches,
+      limit: STANDINGS_RECENT_LIMIT,
     });
-    state.standingsTeamMatches.set(team, matches || []);
+    state.standingsTeamMatches.set(team, (matches || []).slice(0, STANDINGS_RECENT_LIMIT));
   } catch (err) {
     console.error(err);
     if (!state.standingsTeamMatches.has(team)) {
-      state.standingsTeamMatches.set(team, collectLocalTeamMatches(state.allMatches, team));
+      state.standingsTeamMatches.set(
+        team,
+        collectLocalTeamMatches(state.allMatches, team, STANDINGS_RECENT_LIMIT)
+      );
     }
   } finally {
     if (state.standingsTeamLoading === team) state.standingsTeamLoading = null;
@@ -1179,7 +1188,7 @@ function standingsGroupHtml({ group, groupLabel, mode, rows }, opts = {}) {
             <tr class="standings-detail-row${expanded ? "" : " hidden"}" data-team="${r.team}">
               <td colspan="${colspan}">
                 <div class="standings-matches-panel">
-                  <div class="standings-matches-title">对局记录</div>
+                  <div class="standings-matches-title">近 ${STANDINGS_RECENT_LIMIT} 场</div>
                   ${standingsTeamMatchesHtml(r.team)}
                 </div>
               </td>
