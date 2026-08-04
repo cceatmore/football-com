@@ -339,7 +339,7 @@ function renderExport() {
 
       <p class="export-status" id="export-status"></p>
       <ul class="export-tips">
-        <li>图片为手机竖屏：每场一文件夹；近10场双方同图且每场不同底色；共同对手近1年最多10个</li>
+        <li>图片高度随内容；近10场双方同图分色；共同对手最多5个（先近1年，没有再近2年，仍没有则不出该图）</li>
         <li>同一天多场会按日期分子文件夹打包 ZIP</li>
         <li>Excel 含场次、联赛、对阵、简要分析、胜负/比分预测；可自行改内容后再导入</li>
         <li>导入时只按你表里当前的胜负/比分预测核对完赛结果，猜对标红（不依赖导出时的原值）</li>
@@ -372,20 +372,37 @@ function renderExport() {
   });
 }
 
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+const TWO_YEAR_MS = 2 * ONE_YEAR_MS;
+
+/** 导出用共同对手：先近1年最多5个；没有再近2年；仍没有则不出图 */
+function buildExportCommonOpponents(match, form) {
+  const homeMatches = form.scoreHome || form.home || [];
+  const awayMatches = form.scoreAway || form.away || [];
+  const oneYear = buildCommonOpponentsAnalysis(match.home, match.away, homeMatches, awayMatches, {
+    limit: 5,
+    withinMs: ONE_YEAR_MS,
+  });
+  if (oneYear?.items?.length) {
+    return { ...oneYear, windowLabel: "近1年" };
+  }
+  const twoYear = buildCommonOpponentsAnalysis(match.home, match.away, homeMatches, awayMatches, {
+    limit: 5,
+    withinMs: TWO_YEAR_MS,
+  });
+  if (twoYear?.items?.length) {
+    return { ...twoYear, windowLabel: "近2年" };
+  }
+  return null;
+}
+
 async function collectMatchExportData(match, onProgress) {
   onProgress?.("拉取近况与共同对手…");
   const [form, injury] = await Promise.all([
     loadPredictionForm(match),
     fetchInjuryAnalysis(match).catch(() => null),
   ]);
-  // 导出图展示更多共同对手
-  form.commonOpponents = buildCommonOpponentsAnalysis(
-    match.home,
-    match.away,
-    form.scoreHome || form.home || [],
-    form.scoreAway || form.away || [],
-    { limit: 10 }
-  );
+  form.commonOpponents = buildExportCommonOpponents(match, form);
 
   // 批量导出优先用缓存机构观点；未缓存则用近况/伤停生成，避免逐场抓网页过慢
   let analysis = state.predictionCache.get(match.id);
@@ -404,10 +421,11 @@ async function collectMatchExportData(match, onProgress) {
   const scoreOutlook = buildScoreOutlook(match, form, analysis.consensus?.goals);
 
   onProgress?.("绘制竖屏图片…");
-  const [recentPng, commonPng] = await Promise.all([
-    renderRecentFormImage(match, form.home, form.away),
-    renderCommonOpponentsImage(match, form.commonOpponents),
-  ]);
+  const recentPng = await renderRecentFormImage(match, form.home, form.away);
+  // 两年内仍无共同对手则不输出该图
+  const commonPng = form.commonOpponents
+    ? await renderCommonOpponentsImage(match, form.commonOpponents)
+    : null;
 
   return {
     match,

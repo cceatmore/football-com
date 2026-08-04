@@ -534,8 +534,10 @@ export function buildCommonOpponentsAnalysis(homeTeam, awayTeam, homeMatches, aw
     else even += 1;
   }
 
+  const windowLabel =
+    withinMs >= 2 * ONE_YEAR_MS - 86400000 ? "近2年" : withinMs >= ONE_YEAR_MS - 86400000 ? "近1年" : `近${Math.round(withinMs / 86400000)}天`;
   let lean = null;
-  let text = "近1年暂无共同对手样本";
+  let text = `${windowLabel}暂无共同对手样本`;
   if (shown.length) {
     if (homeBetter > awayBetter) lean = "home";
     else if (awayBetter > homeBetter) lean = "away";
@@ -546,7 +548,7 @@ export function buildCommonOpponentsAnalysis(homeTeam, awayTeam, homeMatches, aw
         : lean === "away"
           ? `共同对手对比更看好 ${awayTeam}`
           : "共同对手对比双方接近";
-    text = `近1年共同对手 ${shown.length} 个：${homeTeam}更优 ${homeBetter} · ${awayTeam}更优 ${awayBetter} · 相当 ${even}。${leanText}`;
+    text = `${windowLabel}共同对手 ${shown.length} 个：${homeTeam}更优 ${homeBetter} · ${awayTeam}更优 ${awayBetter} · 相当 ${even}。${leanText}`;
   }
 
   return {

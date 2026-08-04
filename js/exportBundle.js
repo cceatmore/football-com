@@ -278,7 +278,7 @@ function drawRecentBlock(ctx, teamName, matches, y0) {
   return y + 16;
 }
 
-/** 双方近 10 场竖屏图（同图，每场不同底色） */
+/** 双方近 10 场竖屏图（同图，每场不同底色；高度随内容） */
 export async function renderRecentFormImage(match, homeMatches, awayMatches) {
   const home = (homeMatches || []).filter((m) => m.finished).slice(0, 10);
   const away = (awayMatches || []).filter((m) => m.finished).slice(0, 10);
@@ -290,12 +290,11 @@ export async function renderRecentFormImage(match, homeMatches, awayMatches) {
   let height = 220;
   height += measureRecentBlock(ctx, match.home, home) + 24;
   height += measureRecentBlock(ctx, match.away, away) + 24;
-  height += 80;
-  height = Math.max(height, 1920);
+  height += 72;
 
   canvas.width = PHONE_W;
-  canvas.height = height;
-  fillBackground(ctx, PHONE_W, height);
+  canvas.height = Math.ceil(height);
+  fillBackground(ctx, PHONE_W, canvas.height);
 
   let y = 72;
   y = drawHeader(ctx, match, "近期战绩", y);
@@ -304,7 +303,21 @@ export async function renderRecentFormImage(match, homeMatches, awayMatches) {
 
   ctx.fillStyle = "#9ca3af";
   ctx.font = `400 22px ${FONT}`;
-  ctx.fillText("双方近10场同图 · 每场不同底色区分 · 含半场/全场/加时/点球", PAD, height - 40);
+  ctx.fillText("双方近10场同图 · 每场不同底色区分 · 含半场/全场/加时/点球", PAD, y + 8);
+  y += 48;
+
+  const finalH = Math.max(Math.ceil(y + 24), 400);
+  if (finalH < canvas.height) {
+    const cropped = document.createElement("canvas");
+    cropped.width = PHONE_W;
+    cropped.height = finalH;
+    cropped.getContext("2d").drawImage(canvas, 0, 0);
+    return canvasToPngBlob(cropped);
+  }
+  if (finalH > canvas.height) {
+    // 内容略超出预估时以实际绘制终点为准重画背景不够——直接按当前画布输出
+    return canvasToPngBlob(canvas);
+  }
 
   return canvasToPngBlob(canvas);
 }
@@ -368,25 +381,17 @@ function drawCommonItem(ctx, it, index, homeName, awayName, x, y, w) {
   return y + rowH + 12;
 }
 
-function drawCommonBlock(ctx, items, homeName, awayName, y0) {
+function drawCommonBlock(ctx, items, homeName, awayName, y0, windowLabel = "近1年") {
   const boxX = PAD;
   const boxW = PHONE_W - PAD * 2;
   let y = y0;
 
   ctx.fillStyle = "#111827";
   ctx.font = `700 34px ${FONT}`;
-  ctx.fillText("近1年共同对手（最多10个）", boxX, y);
+  ctx.fillText(`${windowLabel}共同对手（最多5个）`, boxX, y);
   y += 44;
 
-  if (!items.length) {
-    ctx.fillStyle = "#ffffff";
-    roundRect(ctx, boxX, y, boxW, 64, 14);
-    ctx.fill();
-    ctx.fillStyle = "#9ca3af";
-    ctx.font = `400 28px ${FONT}`;
-    ctx.fillText("暂无共同对手样本", boxX + 24, y + 40);
-    return y + 80;
-  }
+  if (!items.length) return y;
 
   items.forEach((it, i) => {
     y = drawCommonItem(ctx, it, i, homeName, awayName, boxX, y, boxW);
@@ -394,23 +399,31 @@ function drawCommonBlock(ctx, items, homeName, awayName, y0) {
   return y + 16;
 }
 
-/** 双方近 1 年共同对手竖屏图（最多 10 个） */
+/**
+ * 共同对手竖屏图（最多 5 个）。
+ * 无有效共同对手时返回 null，不输出图片。
+ * 高度按内容自适应，不强制拉长。
+ */
 export async function renderCommonOpponentsImage(match, commonOpponents) {
-  const items = (commonOpponents?.items || []).slice(0, 10);
+  const items = (commonOpponents?.items || []).slice(0, 5);
+  if (!items.length) return null;
+
+  const windowLabel = commonOpponents?.windowLabel || "近1年";
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   ctx.font = `400 24px ${FONT}`;
 
-  let height = 220;
+  // 先量内容高度，再按内容出图
+  let height = 72 + 180; // 顶距 + 标题区约估，绘制后裁切到实际
   if (commonOpponents?.summary?.text) {
+    ctx.font = `400 26px ${FONT}`;
     height += wrapLines(ctx, commonOpponents.summary.text, PHONE_W - PAD * 2).length * 36 + 16;
   }
-  height += measureCommonBlock(ctx, items, match.home, match.away) + 100;
-  height = Math.max(height, 1920);
+  height += measureCommonBlock(ctx, items, match.home, match.away) + 72;
 
   canvas.width = PHONE_W;
-  canvas.height = height;
-  fillBackground(ctx, PHONE_W, height);
+  canvas.height = Math.ceil(height);
+  fillBackground(ctx, PHONE_W, canvas.height);
 
   let y = 72;
   y = drawHeader(ctx, match, "共同对手", y);
@@ -425,11 +438,22 @@ export async function renderCommonOpponentsImage(match, commonOpponents) {
     y += 16;
   }
 
-  drawCommonBlock(ctx, items, match.home, match.away, y);
+  y = drawCommonBlock(ctx, items, match.home, match.away, y, windowLabel);
 
   ctx.fillStyle = "#9ca3af";
   ctx.font = `400 22px ${FONT}`;
-  ctx.fillText("近1年内共同对手最多10个 · 仅供参考", PAD, height - 40);
+  ctx.fillText(`${windowLabel}共同对手最多5个 · 仅供参考`, PAD, y + 8);
+  y += 48;
+
+  // 按实际绘制高度裁切，去掉多余空白
+  const finalH = Math.max(Math.ceil(y + 24), 400);
+  if (finalH < canvas.height) {
+    const cropped = document.createElement("canvas");
+    cropped.width = PHONE_W;
+    cropped.height = finalH;
+    cropped.getContext("2d").drawImage(canvas, 0, 0);
+    return canvasToPngBlob(cropped);
+  }
 
   return canvasToPngBlob(canvas);
 }
@@ -459,6 +483,38 @@ async function loadAvatarBuffer() {
   return res.arrayBuffer();
 }
 
+/** 生成倾斜粉色水印 PNG（透明底，浮于表格之上，不锁定单元格） */
+async function createWatermarkBuffer() {
+  const w = 1800;
+  const h = 2400;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate((-28 * Math.PI) / 180);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `700 64px ${FONT}`;
+  ctx.fillStyle = "rgba(244, 114, 182, 0.22)"; // 粉色半透明
+  const text = "cc体育预测";
+  const stepX = 320;
+  const stepY = 160;
+  for (let y = -h; y <= h; y += stepY) {
+    for (let x = -w; x <= w; x += stepX) {
+      ctx.fillText(text, x, y);
+    }
+  }
+  ctx.restore();
+
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("水印生成失败"))), "image/png");
+  });
+  return blob.arrayBuffer();
+}
+
 function applyRowBorders(row, colCount = EXCEL_COL_COUNT) {
   for (let c = 1; c <= colCount; c += 1) {
     row.getCell(c).border = EXCEL_BORDER;
@@ -480,9 +536,10 @@ export async function buildPredictionsWorkbook(rows) {
   });
 
   // 第 1 行：标题区（合并居中 + 左侧头像）
+  const TITLE_ROW_PT = 78;
   ws.mergeCells(1, 1, 1, EXCEL_COL_COUNT);
   const titleRow = ws.getRow(1);
-  titleRow.height = 64;
+  titleRow.height = TITLE_ROW_PT;
   const titleCell = titleRow.getCell(1);
   titleCell.value = {
     richText: [
@@ -510,10 +567,12 @@ export async function buildPredictionsWorkbook(rows) {
       buffer: avatarBuf,
       extension: "png",
     });
-    // 左侧头像，贴近标题行
+    // 红框位置：标题行左侧；高度接近填满标题行，宽度按 1:1 宽高比
+    const avatarPx = Math.round((TITLE_ROW_PT * 96) / 72) - 6;
+    const vPadFrac = 3 / TITLE_ROW_PT;
     ws.addImage(imageId, {
-      tl: { col: 0.15, row: 0.12 },
-      ext: { width: 52, height: 52 },
+      tl: { col: 0.22, row: vPadFrac },
+      ext: { width: avatarPx, height: avatarPx },
       editAs: "oneCell",
     });
   } catch (err) {
@@ -549,8 +608,24 @@ export async function buildPredictionsWorkbook(rows) {
       cell.font = { name: "微软雅黑", size: 11, color: { argb: "FF111827" } };
       cell.border = EXCEL_BORDER;
     });
-    // addRow 后空列也可能需补边框
     applyRowBorders(r);
+  }
+
+  // 整表粉色倾斜水印（浮层图片，不锁定单元格，可照常改数据）
+  try {
+    const wmBuf = await createWatermarkBuffer();
+    const wmId = wb.addImage({
+      buffer: wmBuf,
+      extension: "png",
+    });
+    const lastRow = Math.max(ws.rowCount, 2);
+    ws.addImage(wmId, {
+      tl: { col: 0, row: 0 },
+      br: { col: EXCEL_COL_COUNT, row: lastRow },
+      editAs: "absolute",
+    });
+  } catch (err) {
+    console.warn("Excel 水印未写入", err);
   }
 
   const buf = await wb.xlsx.writeBuffer();
