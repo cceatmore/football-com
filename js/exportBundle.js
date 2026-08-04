@@ -22,6 +22,20 @@ const RESULT_COLOR = {
   未赛: "#9ca3af",
 };
 
+/** 近况每一场对局的区分底色（循环使用） */
+const MATCH_ROW_COLORS = [
+  "#E8F1FF",
+  "#EAF8F0",
+  "#FFF6E5",
+  "#F3E8FF",
+  "#E7F8F8",
+  "#FFECEF",
+  "#EEF2FF",
+  "#F0FDF4",
+  "#FEF3C7",
+  "#FCE7F3",
+];
+
 let depsPromise = null;
 
 function loadScript(src) {
@@ -174,77 +188,97 @@ function formatRecentLine(match, team) {
   return { when, home, away, result, venue, score };
 }
 
-function measureRecentBlock(ctx, teamName, matches) {
-  let h = 56 + 44;
+function measureMatchRow(ctx, teamName, match, maxW) {
+  const line = formatRecentLine(match, teamName);
   ctx.font = `600 26px ${FONT}`;
-  const maxW = PHONE_W - PAD * 2 - 48;
+  let h = wrapLines(ctx, `${line.when}  ${line.home} VS ${line.away}`, maxW).length * 34;
+  ctx.font = `400 24px ${FONT}`;
+  const detail = `${line.venue ? `[${line.venue}] ` : ""}${line.score}`;
+  h += wrapLines(ctx, detail, maxW - 80).length * 30;
+  return h + 28; // 上下内边距
+}
+
+function measureRecentBlock(ctx, teamName, matches) {
+  const maxW = PHONE_W - PAD * 2 - 40;
+  let h = 52; // 标题
+  if (!matches.length) return h + 56;
   for (const m of matches) {
-    const line = formatRecentLine(m, teamName);
-    const row = `${line.when}  ${line.home} VS ${line.away}`;
-    h += wrapLines(ctx, row, maxW).length * 34;
-    ctx.font = `400 24px ${FONT}`;
-    const detail = `${line.venue ? `[${line.venue}] ` : ""}${line.score}  赛果 ${line.result}`;
-    h += wrapLines(ctx, detail, maxW).length * 30;
-    h += 14;
-    ctx.font = `600 26px ${FONT}`;
+    h += measureMatchRow(ctx, teamName, m, maxW) + 12; // 行间距
   }
-  if (!matches.length) h += 40;
-  return h + 28;
+  return h + 8;
+}
+
+function drawMatchRow(ctx, teamName, match, index, x, y, w) {
+  const maxW = w - 40;
+  const rowH = measureMatchRow(ctx, teamName, match, maxW);
+  const bg = MATCH_ROW_COLORS[index % MATCH_ROW_COLORS.length];
+
+  ctx.fillStyle = bg;
+  roundRect(ctx, x, y, w, rowH, 14);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.06)";
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, rowH, 14);
+  ctx.stroke();
+
+  const line = formatRecentLine(match, teamName);
+  let ty = y + 32;
+
+  // 序号小标
+  ctx.fillStyle = "rgba(17, 24, 39, 0.45)";
+  ctx.font = `700 20px ${FONT}`;
+  ctx.fillText(`${index + 1}`, x + 14, ty - 8);
+
+  ctx.fillStyle = "#111827";
+  ctx.font = `600 26px ${FONT}`;
+  for (const t of wrapLines(ctx, `${line.when}  ${line.home} VS ${line.away}`, maxW - 24)) {
+    ctx.fillText(t, x + 36, ty);
+    ty += 34;
+  }
+
+  ctx.fillStyle = "#4b5563";
+  ctx.font = `400 24px ${FONT}`;
+  const detail = `${line.venue ? `[${line.venue}] ` : ""}${line.score}`;
+  for (const t of wrapLines(ctx, detail, maxW - 80)) {
+    ctx.fillText(t, x + 36, ty);
+    ty += 30;
+  }
+
+  // 右侧赛果
+  ctx.fillStyle = RESULT_COLOR[line.result] || "#6b7280";
+  ctx.font = `700 28px ${FONT}`;
+  ctx.fillText(line.result, x + w - 56, y + 36);
+
+  return y + rowH + 12;
 }
 
 function drawRecentBlock(ctx, teamName, matches, y0) {
-  let y = y0;
   const boxX = PAD;
   const boxW = PHONE_W - PAD * 2;
-  const boxH = measureRecentBlock(ctx, teamName, matches);
+  let y = y0;
 
-  ctx.fillStyle = "#ffffff";
-  roundRect(ctx, boxX, y, boxW, boxH, 20);
-  ctx.fill();
-  ctx.strokeStyle = "#e5e7eb";
-  ctx.lineWidth = 2;
-  roundRect(ctx, boxX, y, boxW, boxH, 20);
-  ctx.stroke();
-
-  y += 44;
   ctx.fillStyle = "#111827";
   ctx.font = `700 34px ${FONT}`;
-  ctx.fillText(`${teamLabel(teamName)} · 近10场`, boxX + 24, y);
+  ctx.fillText(`${teamLabel(teamName)} · 近10场`, boxX, y);
   y += 44;
 
   if (!matches.length) {
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, boxX, y, boxW, 64, 14);
+    ctx.fill();
     ctx.fillStyle = "#9ca3af";
     ctx.font = `400 28px ${FONT}`;
-    ctx.fillText("暂无近况数据", boxX + 24, y);
-    return y0 + boxH + 28;
+    ctx.fillText("暂无近况数据", boxX + 24, y + 40);
+    return y + 80;
   }
 
-  const maxW = boxW - 48;
-  for (const m of matches) {
-    const line = formatRecentLine(m, teamName);
-    ctx.fillStyle = "#374151";
-    ctx.font = `600 26px ${FONT}`;
-    for (const t of wrapLines(ctx, `${line.when}  ${line.home} VS ${line.away}`, maxW)) {
-      ctx.fillText(t, boxX + 24, y);
-      y += 34;
-    }
-    const detail = `${line.venue ? `[${line.venue}] ` : ""}${line.score}  赛果 ${line.result}`;
-    ctx.fillStyle = "#6b7280";
-    ctx.font = `400 24px ${FONT}`;
-    for (const t of wrapLines(ctx, detail, maxW)) {
-      ctx.fillText(t, boxX + 24, y);
-      y += 30;
-    }
-    // 赛果色标
-    ctx.fillStyle = RESULT_COLOR[line.result] || "#6b7280";
-    ctx.font = `700 26px ${FONT}`;
-    ctx.fillText(line.result, boxX + boxW - 72, y - 30);
-    y += 14;
-  }
-  return y0 + boxH + 28;
+  matches.forEach((m, i) => {
+    y = drawMatchRow(ctx, teamName, m, i, boxX, y, boxW);
+  });
+  return y + 16;
 }
 
-/** 双方近 10 场竖屏图（同图） */
+/** 双方近 10 场竖屏图（同图，每场不同底色） */
 export async function renderRecentFormImage(match, homeMatches, awayMatches) {
   const home = (homeMatches || []).filter((m) => m.finished).slice(0, 10);
   const away = (awayMatches || []).filter((m) => m.finished).slice(0, 10);
@@ -254,8 +288,8 @@ export async function renderRecentFormImage(match, homeMatches, awayMatches) {
   ctx.font = `400 26px ${FONT}`;
 
   let height = 220;
-  height += measureRecentBlock(ctx, match.home, home) + 28;
-  height += measureRecentBlock(ctx, match.away, away) + 28;
+  height += measureRecentBlock(ctx, match.home, home) + 24;
+  height += measureRecentBlock(ctx, match.away, away) + 24;
   height += 80;
   height = Math.max(height, 1920);
 
@@ -270,25 +304,27 @@ export async function renderRecentFormImage(match, homeMatches, awayMatches) {
 
   ctx.fillStyle = "#9ca3af";
   ctx.font = `400 22px ${FONT}`;
-  ctx.fillText("含半场 / 全场 / 加时 / 点球（如有）· 仅供参考", PAD, height - 40);
+  ctx.fillText("双方近10场同图 · 每场不同底色区分 · 含半场/全场/加时/点球", PAD, height - 40);
 
   return canvasToPngBlob(canvas);
 }
 
-function measureCommonBlock(ctx, items, homeName, awayName) {
-  let h = 56;
-  const maxW = PHONE_W - PAD * 2 - 48;
+function measureCommonItem(ctx, it, homeName, awayName, maxW) {
+  let h = 36;
   ctx.font = `400 24px ${FONT}`;
-  if (!items.length) return h + 48;
+  h += wrapLines(ctx, formatCommonSide(it.home, homeName, it.opponent), maxW).length * 30;
+  h += wrapLines(ctx, formatCommonSide(it.away, awayName, it.opponent), maxW).length * 30;
+  return h + 28;
+}
+
+function measureCommonBlock(ctx, items, homeName, awayName) {
+  const maxW = PHONE_W - PAD * 2 - 40;
+  let h = 52;
+  if (!items.length) return h + 56;
   for (const it of items) {
-    h += 40;
-    const homeLine = formatCommonSide(it.home, homeName, it.opponent);
-    const awayLine = formatCommonSide(it.away, awayName, it.opponent);
-    h += wrapLines(ctx, homeLine, maxW).length * 30;
-    h += wrapLines(ctx, awayLine, maxW).length * 30;
-    h += 28;
+    h += measureCommonItem(ctx, it, homeName, awayName, maxW) + 12;
   }
-  return h + 20;
+  return h + 8;
 }
 
 function formatCommonSide(side, teamName, opponent) {
@@ -297,66 +333,79 @@ function formatCommonSide(side, teamName, opponent) {
   const when = side.when || formatMatchWhen(m) || "";
   const score = scoreDetail(m);
   const full = formatHistoryScoreText(m) || `${m.homeScore}:${m.awayScore}`;
-  return `${teamLabel(teamName)} ${side.venue || ""}场 ${side.result} · ${teamLabel(m.home)} VS ${teamLabel(m.away)} · ${score || full}${when ? ` · ${when}` : ""} · 对手 ${teamLabel(opponent)}`;
+  return `${teamLabel(teamName)} ${side.venue || ""}场 ${side.result} · ${teamLabel(m.home)} VS ${teamLabel(m.away)} · ${score || full}${when ? ` · ${when}` : ""}`;
+}
+
+function drawCommonItem(ctx, it, index, homeName, awayName, x, y, w) {
+  const maxW = w - 40;
+  const rowH = measureCommonItem(ctx, it, homeName, awayName, maxW);
+  const bg = MATCH_ROW_COLORS[index % MATCH_ROW_COLORS.length];
+
+  ctx.fillStyle = bg;
+  roundRect(ctx, x, y, w, rowH, 14);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.06)";
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, rowH, 14);
+  ctx.stroke();
+
+  let ty = y + 32;
+  ctx.fillStyle = "#1d4ed8";
+  ctx.font = `700 26px ${FONT}`;
+  ctx.fillText(`${index + 1}. 共同对手：${teamLabel(it.opponent)}`, x + 18, ty);
+  ty += 36;
+
+  ctx.fillStyle = "#374151";
+  ctx.font = `400 24px ${FONT}`;
+  for (const t of wrapLines(ctx, formatCommonSide(it.home, homeName, it.opponent), maxW)) {
+    ctx.fillText(t, x + 18, ty);
+    ty += 30;
+  }
+  for (const t of wrapLines(ctx, formatCommonSide(it.away, awayName, it.opponent), maxW)) {
+    ctx.fillText(t, x + 18, ty);
+    ty += 30;
+  }
+  return y + rowH + 12;
 }
 
 function drawCommonBlock(ctx, items, homeName, awayName, y0) {
-  let y = y0;
   const boxX = PAD;
   const boxW = PHONE_W - PAD * 2;
-  const boxH = measureCommonBlock(ctx, items, homeName, awayName);
+  let y = y0;
 
-  ctx.fillStyle = "#ffffff";
-  roundRect(ctx, boxX, y, boxW, boxH, 20);
-  ctx.fill();
-  ctx.strokeStyle = "#e5e7eb";
-  ctx.lineWidth = 2;
-  roundRect(ctx, boxX, y, boxW, boxH, 20);
-  ctx.stroke();
-
-  y += 44;
   ctx.fillStyle = "#111827";
   ctx.font = `700 34px ${FONT}`;
-  ctx.fillText("近1年共同对手", boxX + 24, y);
-  y += 48;
+  ctx.fillText("近1年共同对手（最多10个）", boxX, y);
+  y += 44;
 
   if (!items.length) {
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, boxX, y, boxW, 64, 14);
+    ctx.fill();
     ctx.fillStyle = "#9ca3af";
     ctx.font = `400 28px ${FONT}`;
-    ctx.fillText("暂无共同对手样本", boxX + 24, y);
-    return y0 + boxH + 28;
+    ctx.fillText("暂无共同对手样本", boxX + 24, y + 40);
+    return y + 80;
   }
 
-  const maxW = boxW - 48;
-  for (const it of items) {
-    ctx.fillStyle = "#2563eb";
-    ctx.font = `700 28px ${FONT}`;
-    ctx.fillText(`共同对手：${teamLabel(it.opponent)}`, boxX + 24, y);
-    y += 38;
-
-    ctx.fillStyle = "#374151";
-    ctx.font = `400 24px ${FONT}`;
-    for (const t of wrapLines(ctx, formatCommonSide(it.home, homeName, it.opponent), maxW)) {
-      ctx.fillText(t, boxX + 24, y);
-      y += 30;
-    }
-    for (const t of wrapLines(ctx, formatCommonSide(it.away, awayName, it.opponent), maxW)) {
-      ctx.fillText(t, boxX + 24, y);
-      y += 30;
-    }
-    y += 20;
-  }
-  return y0 + boxH + 28;
+  items.forEach((it, i) => {
+    y = drawCommonItem(ctx, it, i, homeName, awayName, boxX, y, boxW);
+  });
+  return y + 16;
 }
 
-/** 双方近 1 年共同对手竖屏图 */
+/** 双方近 1 年共同对手竖屏图（最多 10 个） */
 export async function renderCommonOpponentsImage(match, commonOpponents) {
-  const items = commonOpponents?.items || [];
+  const items = (commonOpponents?.items || []).slice(0, 10);
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
   ctx.font = `400 24px ${FONT}`;
 
-  let height = 220 + measureCommonBlock(ctx, items, match.home, match.away) + 100;
+  let height = 220;
+  if (commonOpponents?.summary?.text) {
+    height += wrapLines(ctx, commonOpponents.summary.text, PHONE_W - PAD * 2).length * 36 + 16;
+  }
+  height += measureCommonBlock(ctx, items, match.home, match.away) + 100;
   height = Math.max(height, 1920);
 
   canvas.width = PHONE_W;
@@ -380,7 +429,7 @@ export async function renderCommonOpponentsImage(match, commonOpponents) {
 
   ctx.fillStyle = "#9ca3af";
   ctx.font = `400 22px ${FONT}`;
-  ctx.fillText("近1年内双方都交过手的同一对手 · 仅供参考", PAD, height - 40);
+  ctx.fillText("近1年内共同对手最多10个 · 仅供参考", PAD, height - 40);
 
   return canvasToPngBlob(canvas);
 }
@@ -395,54 +444,113 @@ function canvasToPngBlob(canvas) {
 }
 
 const EXCEL_HEADERS = ["场次编号", "联赛信息", "对战队伍", "简要分析", "胜负预测", "比分预测"];
+const EXCEL_AVATAR_URL = new URL("../assets/excel-avatar.png", import.meta.url).href;
+const EXCEL_COL_COUNT = 6;
+const EXCEL_BORDER = {
+  top: { style: "thin", color: { argb: "FF000000" } },
+  left: { style: "thin", color: { argb: "FF000000" } },
+  bottom: { style: "thin", color: { argb: "FF000000" } },
+  right: { style: "thin", color: { argb: "FF000000" } },
+};
+
+async function loadAvatarBuffer() {
+  const res = await fetch(EXCEL_AVATAR_URL, { cache: "force-cache" });
+  if (!res.ok) throw new Error("标题头像加载失败");
+  return res.arrayBuffer();
+}
+
+function applyRowBorders(row, colCount = EXCEL_COL_COUNT) {
+  for (let c = 1; c <= colCount; c += 1) {
+    row.getCell(c).border = EXCEL_BORDER;
+  }
+}
 
 export async function buildPredictionsWorkbook(rows) {
   const { ExcelJS } = await loadDeps();
   const wb = new ExcelJS.Workbook();
-  wb.creator = "football-com";
+  wb.creator = "cc体育";
   const ws = wb.addWorksheet("预测导出", {
-    views: [{ state: "frozen", ySplit: 1 }],
+    views: [{ state: "frozen", ySplit: 2 }],
   });
 
-  ws.columns = [
-    { header: EXCEL_HEADERS[0], key: "num", width: 12 },
-    { header: EXCEL_HEADERS[1], key: "league", width: 12 },
-    { header: EXCEL_HEADERS[2], key: "matchup", width: 28 },
-    { header: EXCEL_HEADERS[3], key: "analysis", width: 56 },
-    { header: EXCEL_HEADERS[4], key: "outcome", width: 14 },
-    { header: EXCEL_HEADERS[5], key: "scores", width: 22 },
-  ];
+  const widths = [12, 12, 28, 56, 14, 22];
+  widths.forEach((w, i) => {
+    ws.getColumn(i + 1).width = w;
+    ws.getColumn(i + 1).key = ["num", "league", "matchup", "analysis", "outcome", "scores"][i];
+  });
 
-  const header = ws.getRow(1);
-  header.font = { bold: true, size: 12 };
-  header.fill = {
+  // 第 1 行：标题区（合并居中 + 左侧头像）
+  ws.mergeCells(1, 1, 1, EXCEL_COL_COUNT);
+  const titleRow = ws.getRow(1);
+  titleRow.height = 64;
+  const titleCell = titleRow.getCell(1);
+  titleCell.value = {
+    richText: [
+      {
+        font: { name: "微软雅黑", size: 20, bold: true, color: { argb: "FF000000" } },
+        text: "cc体育每日分析",
+      },
+      {
+        font: { name: "微软雅黑", size: 11, bold: false, color: { argb: "FF000000" } },
+        text: "\n推荐仅供娱乐参考",
+      },
+    ],
+  };
+  titleCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  titleCell.fill = {
     type: "pattern",
     pattern: "solid",
-    fgColor: { argb: "FFE5E7EB" },
+    fgColor: { argb: "FFF8FAFC" },
   };
-  header.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-  header.height = 22;
+  applyRowBorders(titleRow);
 
-  for (const row of rows) {
-    const r = ws.addRow({
-      num: row.num,
-      league: row.league,
-      matchup: row.matchup,
-      analysis: row.analysis,
-      outcome: row.outcome,
-      scores: row.scores,
+  try {
+    const avatarBuf = await loadAvatarBuffer();
+    const imageId = wb.addImage({
+      buffer: avatarBuf,
+      extension: "png",
     });
-    r.alignment = { vertical: "top", wrapText: true };
-    r.height = Math.min(120, 36 + Math.ceil(String(row.analysis || "").length / 28) * 14);
+    // 左侧头像，贴近标题行
+    ws.addImage(imageId, {
+      tl: { col: 0.15, row: 0.12 },
+      ext: { width: 52, height: 52 },
+      editAs: "oneCell",
+    });
+  } catch (err) {
+    console.warn("Excel 头像未写入", err);
   }
 
-  for (let i = 1; i <= 6; i += 1) {
-    ws.getColumn(i).border = {
-      top: { style: "thin", color: { argb: "FFD1D5DB" } },
-      left: { style: "thin", color: { argb: "FFD1D5DB" } },
-      bottom: { style: "thin", color: { argb: "FFD1D5DB" } },
-      right: { style: "thin", color: { argb: "FFD1D5DB" } },
+  // 第 2 行：表头
+  const header = ws.getRow(2);
+  EXCEL_HEADERS.forEach((text, i) => {
+    const cell = header.getCell(i + 1);
+    cell.value = text;
+    cell.font = { name: "微软雅黑", bold: true, size: 12, color: { argb: "FF000000" } };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" },
     };
+    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  });
+  header.height = 24;
+  applyRowBorders(header);
+
+  // 数据行（从第 3 行起）
+  for (const row of rows) {
+    const r = ws.addRow([row.num, row.league, row.matchup, row.analysis, row.outcome, row.scores]);
+    r.alignment = { vertical: "top", wrapText: true, horizontal: "left" };
+    r.getCell(1).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    r.getCell(2).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    r.getCell(5).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    r.getCell(6).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    r.height = Math.min(120, 36 + Math.ceil(String(row.analysis || "").length / 28) * 14);
+    r.eachCell((cell) => {
+      cell.font = { name: "微软雅黑", size: 11, color: { argb: "FF111827" } };
+      cell.border = EXCEL_BORDER;
+    });
+    // addRow 后空列也可能需补边框
+    applyRowBorders(r);
   }
 
   const buf = await wb.xlsx.writeBuffer();
@@ -454,18 +562,18 @@ export async function buildPredictionsWorkbook(rows) {
 function parsePredictedOutcomes(text) {
   const keys = new Set();
   const parts = String(text || "")
-    .split(/[、,，/｜|]/)
+    .split(/[、,，/｜|\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
-  if (!parts.length && text) parts.push(String(text).trim());
+  if (!parts.length && String(text || "").trim()) parts.push(String(text).trim());
   for (const p of parts) {
-    if (/双平|平局/.test(p) || p === "平") keys.add("draw");
-    else if (/主负|^负$/.test(p) || p === "负") keys.add("away");
-    else if (/主胜|^胜$/.test(p) || p === "胜") keys.add("home");
+    if (/双平|平局|^平$/.test(p)) keys.add("draw");
+    else if (/主负|^负$|客胜/.test(p)) keys.add("away");
+    else if (/主胜|^胜$/.test(p)) keys.add("home");
     else {
-      if (p.includes("负")) keys.add("away");
-      if (p.includes("胜")) keys.add("home");
-      if (p.includes("平")) keys.add("draw");
+      if (/负|客/.test(p) && !/胜平负/.test(p)) keys.add("away");
+      if (/胜|主/.test(p) && !/主负/.test(p)) keys.add("home");
+      if (/平/.test(p)) keys.add("draw");
     }
   }
   return keys;
@@ -477,8 +585,8 @@ function parsePredictedScores(text) {
   let m;
   const raw = String(text || "");
   while ((m = re.exec(raw))) {
-    scores.add(`${m[1]}-${m[2]}`);
-    scores.add(`${m[1]}:${m[2]}`);
+    scores.add(`${Number(m[1])}-${Number(m[2])}`);
+    scores.add(`${Number(m[1])}:${Number(m[2])}`);
   }
   return scores;
 }
@@ -502,8 +610,121 @@ function redFont() {
   return { color: { argb: "FFDC2626" }, bold: true };
 }
 
+function clearMarkStyle(cell) {
+  if (!cell) return;
+  // 去掉上一次核对留下的红底/红字，再按本次导入内容重判
+  cell.fill = undefined;
+  const prev = cell.font || {};
+  cell.font = {
+    name: prev.name,
+    size: prev.size,
+    family: prev.family,
+    bold: false,
+    italic: !!prev.italic,
+    underline: prev.underline,
+    color: { argb: "FF111827" },
+  };
+}
+
+function markHit(cell) {
+  cell.fill = redFill();
+  const prev = cell.font || {};
+  cell.font = {
+    name: prev.name,
+    size: prev.size,
+    family: prev.family,
+    italic: prev.italic,
+    underline: prev.underline,
+    ...redFont(),
+  };
+}
+
+function normalizeTeamKey(name) {
+  return String(name || "")
+    .replace(/\s+/g, "")
+    .replace(/VS|vs|对阵/g, "")
+    .toLowerCase();
+}
+
+function parseMatchupTeams(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const parts = raw.split(/\s*(?:VS|vs|对阵|－|-|—)\s*/);
+  if (parts.length < 2) return null;
+  const home = parts[0].trim();
+  const away = parts.slice(1).join("").trim();
+  if (!home || !away) return null;
+  return { home, away };
+}
+
+function findFinishedMatch(finishedMatches, { num, matchup }) {
+  const numKey = String(num || "").trim();
+  if (numKey) {
+    const byNum = finishedMatches.find(
+      (m) => String(m.num || "").trim() === numKey || String(m.matchNum ?? "").trim() === numKey
+    );
+    if (byNum) return byNum;
+  }
+  const teams = parseMatchupTeams(matchup);
+  if (!teams) return null;
+  const homeKey = normalizeTeamKey(teams.home);
+  const awayKey = normalizeTeamKey(teams.away);
+  return (
+    finishedMatches.find((m) => {
+      const mh = normalizeTeamKey(m.home);
+      const ma = normalizeTeamKey(m.away);
+      return (
+        (mh === homeKey || mh.includes(homeKey) || homeKey.includes(mh)) &&
+        (ma === awayKey || ma.includes(awayKey) || awayKey.includes(ma))
+      );
+    }) || null
+  );
+}
+
+/** 按表头识别列；结构不变时兼容用户只改内容 */
+function resolveImportColumns(headerRow) {
+  const map = {
+    num: 1,
+    league: 2,
+    matchup: 3,
+    analysis: 4,
+    outcome: 5,
+    scores: 6,
+    actualOutcome: 7,
+    actualScore: 8,
+  };
+  headerRow.eachCell((cell, col) => {
+    const t = cellText(cell).replace(/\s+/g, "");
+    if (/场次/.test(t)) map.num = col;
+    else if (/联赛/.test(t)) map.league = col;
+    else if (/对战|对阵|队伍/.test(t)) map.matchup = col;
+    else if (/简要分析/.test(t) || (/分析/.test(t) && !/每日分析/.test(t))) map.analysis = col;
+    else if (/胜负预测|胜平负/.test(t)) map.outcome = col;
+    else if (/比分预测/.test(t)) map.scores = col;
+    else if (/实际赛果/.test(t)) map.actualOutcome = col;
+    else if (/实际比分/.test(t)) map.actualScore = col;
+  });
+  return map;
+}
+
+/** 查找含「场次编号」的表头行（兼容首行标题） */
+function findHeaderRowNumber(ws) {
+  const maxScan = Math.min(ws.rowCount || 0, 8);
+  for (let r = 1; r <= maxScan; r += 1) {
+    const row = ws.getRow(r);
+    let hit = false;
+    row.eachCell((cell) => {
+      const t = cellText(cell).replace(/\s+/g, "");
+      if (t.includes("场次编号") || t === "场次") hit = true;
+    });
+    if (hit) return r;
+  }
+  return 1;
+}
+
 /**
- * 导入预测表，按完赛结果核对：猜对的胜负/比分单元格标红，输出新 Excel
+ * 导入预测表并标红：只依据「导入文件里当前单元格内容」核对，
+ * 与导出时的原始预测无关；用户改过胜负/比分后按改后的值判断。
  * @param {File} file
  * @param {object[]} finishedMatches
  */
@@ -515,60 +736,79 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
   const ws = wb.worksheets[0];
   if (!ws) throw new Error("Excel 中没有工作表");
 
-  const byNum = new Map();
-  for (const m of finishedMatches) {
-    if (m?.num) byNum.set(String(m.num).trim(), m);
-    if (m?.matchNum != null) byNum.set(String(m.matchNum).trim(), m);
-  }
-
-  const headerRow = ws.getRow(1);
-  const h7 = cellText(headerRow.getCell(7));
-  if (!/实际/.test(h7)) {
-    headerRow.getCell(7).value = "实际赛果";
-    headerRow.getCell(8).value = "实际比分";
-    headerRow.getCell(7).font = { bold: true };
-    headerRow.getCell(8).font = { bold: true };
-    ws.getColumn(7).width = 12;
-    ws.getColumn(8).width = 12;
+  const headerRowNumber = findHeaderRowNumber(ws);
+  const headerRow = ws.getRow(headerRowNumber);
+  const cols = resolveImportColumns(headerRow);
+  if (!/实际/.test(cellText(headerRow.getCell(cols.actualOutcome)))) {
+    headerRow.getCell(cols.actualOutcome).value = "实际赛果";
+    headerRow.getCell(cols.actualScore).value = "实际比分";
+    headerRow.getCell(cols.actualOutcome).font = { bold: true, name: "微软雅黑" };
+    headerRow.getCell(cols.actualScore).font = { bold: true, name: "微软雅黑" };
+    headerRow.getCell(cols.actualOutcome).border = EXCEL_BORDER;
+    headerRow.getCell(cols.actualScore).border = EXCEL_BORDER;
+    ws.getColumn(cols.actualOutcome).width = 12;
+    ws.getColumn(cols.actualScore).width = 12;
   }
 
   let graded = 0;
+  let pending = 0;
   let outcomeHits = 0;
   let scoreHits = 0;
+  let unmatched = 0;
 
   ws.eachRow((row, rowNumber) => {
-    if (rowNumber === 1) return;
-    const num = String(row.getCell(1).value ?? "").trim();
-    if (!num) return;
-    const match = byNum.get(num);
-    if (!match) return;
+    if (rowNumber <= headerRowNumber) return;
+
+    const num = cellText(row.getCell(cols.num)).trim();
+    const matchup = cellText(row.getCell(cols.matchup)).trim();
+    if (!num && !matchup) return;
+    // 跳过误扫到的标题行
+    if (/每日分析|娱乐参考/.test(`${num}${matchup}`)) return;
+
+    // 始终以导入表当前内容为准（用户可能已改过）
+    const outcomeCell = row.getCell(cols.outcome);
+    const scoreCell = row.getCell(cols.scores);
+    const outcomeText = cellText(outcomeCell).trim();
+    const scoreText = cellText(scoreCell).trim();
+
+    // 先清掉旧标红，避免沿用上一次核对结果
+    clearMarkStyle(outcomeCell);
+    clearMarkStyle(scoreCell);
+
+    const match = findFinishedMatch(finishedMatches, { num, matchup });
+    if (!match) {
+      unmatched += 1;
+      row.getCell(cols.actualOutcome).value = "未完赛/未匹配";
+      row.getCell(cols.actualScore).value = "";
+      row.getCell(cols.actualOutcome).border = EXCEL_BORDER;
+      row.getCell(cols.actualScore).border = EXCEL_BORDER;
+      pending += 1;
+      return;
+    }
+
     graded += 1;
-
     const actualKey = actualOutcomeKey(match);
-    const actualScore = `${match.homeScore}-${match.awayScore}`;
-    const actualScoreAlt = `${match.homeScore}:${match.awayScore}`;
-
-    const outcomeCell = row.getCell(5);
-    const scoreCell = row.getCell(6);
-    const outcomeText = cellText(outcomeCell);
-    const scoreText = cellText(scoreCell);
+    const actualScoreDash = `${Number(match.homeScore)}-${Number(match.awayScore)}`;
+    const actualScoreColon = `${Number(match.homeScore)}:${Number(match.awayScore)}`;
 
     if (actualKey && parsePredictedOutcomes(outcomeText).has(actualKey)) {
-      outcomeCell.fill = redFill();
-      outcomeCell.font = { ...(outcomeCell.font || {}), ...redFont() };
+      markHit(outcomeCell);
       outcomeHits += 1;
     }
     const predicted = parsePredictedScores(scoreText);
-    if (predicted.has(actualScore) || predicted.has(actualScoreAlt)) {
-      scoreCell.fill = redFill();
-      scoreCell.font = { ...(scoreCell.font || {}), ...redFont() };
+    if (predicted.has(actualScoreDash) || predicted.has(actualScoreColon)) {
+      markHit(scoreCell);
       scoreHits += 1;
     }
 
     const label =
       actualKey === "home" ? "主胜" : actualKey === "away" ? "主负" : actualKey === "draw" ? "平局" : "";
-    row.getCell(7).value = label;
-    row.getCell(8).value = actualScoreAlt;
+    row.getCell(cols.actualOutcome).value = label;
+    row.getCell(cols.actualScore).value = actualScoreColon;
+    row.getCell(cols.actualOutcome).border = EXCEL_BORDER;
+    row.getCell(cols.actualScore).border = EXCEL_BORDER;
+    outcomeCell.border = EXCEL_BORDER;
+    scoreCell.border = EXCEL_BORDER;
   });
 
   const out = await wb.xlsx.writeBuffer();
@@ -577,6 +817,8 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }),
     graded,
+    pending,
+    unmatched,
     outcomeHits,
     scoreHits,
   };
@@ -585,10 +827,15 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
 function cellText(cell) {
   const v = cell?.value;
   if (v == null) return "";
-  if (typeof v === "object" && v.richText) {
-    return v.richText.map((t) => t.text).join("");
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (typeof v === "string") return v;
+  if (typeof v === "object") {
+    if (v.richText) return v.richText.map((t) => t.text).join("");
+    if (v.text != null) return String(v.text);
+    if (v.result != null) return String(v.result);
+    if (v.hyperlink && v.text) return String(v.text);
+    if (v.formula != null && v.result != null) return String(v.result);
   }
-  if (typeof v === "object" && v.text) return String(v.text);
   return String(v);
 }
 

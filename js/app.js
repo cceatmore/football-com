@@ -322,7 +322,7 @@ function renderExport() {
 
   els.main.innerHTML = `
     <div class="export-page">
-      <p class="export-intro">导出当前可购买场次的竖屏战绩图（近10场 + 共同对手）与预测 Excel；赛后导入同一张表，猜对的胜负/比分将标红。</p>
+      <p class="export-intro">导出当前可购买场次的竖屏战绩图（近10场 + 共同对手）与预测 Excel。可先改表内预测再导入；核对只认导入文件里的当前内容，猜对的胜负/比分标红。</p>
       <div class="export-stat-card">
         <div class="export-stat-value">${matches.length}</div>
         <div class="export-stat-label">可购买场次</div>
@@ -339,10 +339,10 @@ function renderExport() {
 
       <p class="export-status" id="export-status"></p>
       <ul class="export-tips">
-        <li>图片为手机竖屏：每场一文件夹，含「近期10场」「共同对手」两张图</li>
+        <li>图片为手机竖屏：每场一文件夹；近10场双方同图且每场不同底色；共同对手近1年最多10个</li>
         <li>同一天多场会按日期分子文件夹打包 ZIP</li>
-        <li>Excel 含场次、联赛、对阵、简要分析、胜负/比分预测</li>
-        <li>赛后导入原表，系统对照完赛结果，猜对单元格标红并回写实际赛果</li>
+        <li>Excel 含场次、联赛、对阵、简要分析、胜负/比分预测；可自行改内容后再导入</li>
+        <li>导入时只按你表里当前的胜负/比分预测核对完赛结果，猜对标红（不依赖导出时的原值）</li>
       </ul>
       ${dataSourceNote()}
     </div>
@@ -384,7 +384,7 @@ async function collectMatchExportData(match, onProgress) {
     match.away,
     form.scoreHome || form.home || [],
     form.scoreAway || form.away || [],
-    { limit: 20 }
+    { limit: 10 }
   );
 
   // 批量导出优先用缓存机构观点；未缓存则用近况/伤停生成，避免逐场抓网页过慢
@@ -494,7 +494,9 @@ async function runExcelImport(file) {
     const result = await gradeImportedWorkbook(file, finished);
     downloadBlob(result.blob, `预测核对_${stamp()}.xlsx`);
     setExportStatus(
-      `已核对 ${result.graded} 场：胜负命中 ${result.outcomeHits} · 比分命中 ${result.scoreHits}`
+      `已按导入表内容核对 ${result.graded} 场：胜负命中 ${result.outcomeHits} · 比分命中 ${result.scoreHits}${
+        result.pending ? ` · 未完赛/未匹配 ${result.pending}` : ""
+      }`
     );
     showToast("核对完成，已下载标红表");
   } finally {
