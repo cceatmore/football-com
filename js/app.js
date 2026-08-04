@@ -341,7 +341,7 @@ function renderExport() {
       <ul class="export-tips">
         <li>图片高度随内容；近10场双方同图分色；共同对手最多5个（先近1年，没有再近2年，仍没有则不出该图）</li>
         <li>同一天多场会按日期分子文件夹打包 ZIP</li>
-        <li>Excel 含简要分析、胜负（可附让胜/让平/让负）、半场预测、比分预测；可改内容后再导入</li>
+        <li>Excel：胜负最多两项、半全场（胜胜/胜负等）、比分随大小球走势；可改内容后再导入</li>
         <li>导入时只按你表里当前的胜负/比分预测核对完赛结果，猜对标红（不依赖导出时的原值）</li>
       </ul>
       ${dataSourceNote()}
@@ -440,7 +440,7 @@ async function collectMatchExportData(match, onProgress) {
       matchup: `${match.home} VS ${match.away}`,
       analysis: buildExcelBriefAnalysis(match, form, analysis, scoreOutlook),
       outcome: buildExcelOutcomeLabel(analysis, scoreOutlook, match),
-      half: buildExcelHalfLabel(match, form),
+      half: buildExcelHalfFullLabel(match, form, scoreOutlook),
       scores: buildExcelScoreLabel(scoreOutlook),
     },
   };
@@ -513,7 +513,7 @@ async function runExcelImport(file) {
     const result = await gradeImportedWorkbook(file, finished);
     downloadBlob(result.blob, `预测核对_${stamp()}.xlsx`);
     setExportStatus(
-      `已按导入表内容核对 ${result.graded} 场：胜负命中 ${result.outcomeHits} · 半场命中 ${result.halfHits ?? 0} · 比分命中 ${result.scoreHits}${
+      `已按导入表内容核对 ${result.graded} 场：胜负命中 ${result.outcomeHits} · 半全场命中 ${result.halfHits ?? 0} · 比分命中 ${result.scoreHits}${
         result.pending ? ` · 未完赛/未匹配 ${result.pending}` : ""
       }`
     );
@@ -1276,65 +1276,126 @@ function pickOutcomeLabelFromProbs(probs, { dual = true, drawLabel = "双平", a
 }
 
 /**
- * Excel「胜负预测」：机构/模型 1X2，必要时附带让胜/让平/让负
+ * Excel「胜负预测」：最多两个最可能项；必要时用让胜/让平/让负占第二位
  */
 function buildExcelOutcomeLabel(analysis, scoreOutlook, match = null) {
   const agency = (analysis?.sources || []).filter((s) => !s.local);
   const pick = agency.length ? analysis?.consensus?.pick : null;
-  let base = null;
-  let soft = false;
-  if (pick?.key === "home") base = "主胜";
-  else if (pick?.key === "away") base = "负";
-  else if (pick?.key === "draw") {
-    base = "双平";
-    soft = true;
-  } else {
+  const labels = [];
+
+  if (pick?.key === "home") labels.push("主胜");
+  else if (pick?.key === "away") labels.push("负");
+  else if (pick?.key === "draw") labels.push("双平");
+  else {
     const probs =
       scoreOutlook?.lambdaHome != null && scoreOutlook?.lambdaAway != null
         ? outcomeProbsFromLambdas(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway)
         : null;
-    const picked = pickOutcomeLabelFromProbs(probs);
-    if (!picked) return "—";
-    base = picked.text;
-    soft = picked.soft || picked.key === "draw";
+    if (!probs) return "—";
+    const ranked = [
+      { key: "home", label: "主胜", p: probs.home },
+      { key: "draw", label: "双平", p: probs.draw },
+      { key: "away", label: "负", p: probs.away },
+    ].sort((a, b) => b.p - a.p);
+    labels.push(ranked[0].label);
+    // 第二倾向足够接近时才写上，且总数不超过 2
+    if (ranked[1] && ranked[0].p - ranked[1].p < 0.1 && ranked[1].p >= 0.24) {
+      const secondMap = { home: "主胜", draw: "平", away: "负" };
+      labels.push(secondMap[ranked[1].key]);
+    }
   }
 
   const line = parseHandicapLine(match?.hhad?.line);
   if (
-    line == null ||
-    scoreOutlook?.lambdaHome == null ||
-    scoreOutlook?.lambdaAway == null
+    labels.length < 2 &&
+    line != null &&
+    scoreOutlook?.lambdaHome != null &&
+    scoreOutlook?.lambdaAway != null
   ) {
-    return base;
+    const hProbs = handicapOutcomeProbs(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway, line);
+    const hRanked = [
+      { key: "home", label: "让胜", p: hProbs.home },
+      { key: "draw", label: "让平", p: hProbs.draw },
+      { key: "away", label: "让负", p: hProbs.away },
+    ].sort((a, b) => b.p - a.p);
+    const hf = hRanked[0];
+    const hs = hRanked[1];
+    const margin = scoreOutlook.lambdaHome - scoreOutlook.lambdaAway;
+    const clearHandicap = hf.p >= 0.4 && (!hs || hf.p - hs.p >= 0.06);
+    const soft = labels[0] === "双平" || labels[0] === "平";
+    const aligns =
+      (hf.key === "home" && margin + line >= 0.15) ||
+      (hf.key === "away" && margin + line <= -0.15) ||
+      (hf.key === "draw" && Math.abs(margin + line) <= 0.35);
+    if (clearHandicap && (soft || aligns || hf.p >= 0.46) && !labels.includes(hf.label)) {
+      labels.push(hf.label);
+    }
   }
 
-  const hProbs = handicapOutcomeProbs(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway, line);
-  const hRanked = [
-    { key: "home", label: "让胜", p: hProbs.home },
-    { key: "draw", label: "让平", p: hProbs.draw },
-    { key: "away", label: "让负", p: hProbs.away },
-  ].sort((a, b) => b.p - a.p);
-  const [hf, hs] = hRanked;
-  const margin = scoreOutlook.lambdaHome - scoreOutlook.lambdaAway;
-  // 偶尔附加：让球倾向较明确，或胜平负偏软/接近时用让球盘补充
-  const clearHandicap = hf.p >= 0.38 && (!hs || hf.p - hs.p >= 0.05);
-  const aligns =
-    (hf.key === "home" && margin + line >= 0.15) ||
-    (hf.key === "away" && margin + line <= -0.15) ||
-    (hf.key === "draw" && Math.abs(margin + line) <= 0.35);
-  const worthAdd = clearHandicap && (soft || aligns || hf.p >= 0.45);
-  if (!worthAdd) return base;
-  if (base.includes(hf.label)) return base;
-  return `${base}、${hf.label}`;
+  return labels.slice(0, 2).join("、") || "—";
 }
 
+/**
+ * 比分预测：按进球走势加权，避免一味小比分；大球/大比分时给出更高比分选项
+ */
 function buildExcelScoreLabel(scoreOutlook) {
-  const top =
-    scoreOutlook?.lambdaHome != null && scoreOutlook?.lambdaAway != null
-      ? buildTopScorePicks(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway, 5, 3)
-      : (scoreOutlook?.topScores || []).slice(0, 3);
-  if (!top.length) return "—";
-  return top.map((s) => `${s.home}-${s.away}`).join("、");
+  if (!scoreOutlook || scoreOutlook.pending) return "—";
+  const lh = scoreOutlook.lambdaHome;
+  const la = scoreOutlook.lambdaAway;
+  if (lh == null || la == null) {
+    const fallback = (scoreOutlook.topScores || []).slice(0, 3);
+    return fallback.length ? fallback.map((s) => `${s.home}-${s.away}`).join("、") : "—";
+  }
+
+  const lean = String(scoreOutlook.lean || "");
+  const expected = scoreOutlook.expected ?? lh + la;
+  const maxGoals = expected >= 3.2 || /大比分/.test(lean) ? 6 : expected >= 2.6 || /大球/.test(lean) ? 5 : 4;
+  const grid = [];
+  for (let h = 0; h <= maxGoals; h += 1) {
+    for (let a = 0; a <= maxGoals; a += 1) {
+      const p = poissonPmf(h, lh) * poissonPmf(a, la);
+      const total = h + a;
+      const margin = Math.abs(h - a);
+      let boost = 1;
+      if (/偏大比分/.test(lean)) {
+        if (total >= 4 || (total >= 3 && margin >= 2)) boost = 1.55;
+        else if (total <= 1) boost = 0.55;
+      } else if (/偏大球/.test(lean)) {
+        if (total >= 3) boost = 1.35;
+        else if (total <= 1) boost = 0.65;
+      } else if (/偏小球/.test(lean)) {
+        if (total <= 2) boost = 1.35;
+        else if (total >= 4) boost = 0.55;
+      } else {
+        // 中性：按期望进球轻微拉开高低比分
+        if (expected >= 2.8 && total >= 3) boost = 1.12;
+        if (expected <= 2.2 && total <= 2) boost = 1.12;
+      }
+      // 一边倒时抬高符合净胜方向的比分
+      if (lh - la >= 0.55 && h > a) boost *= 1.08;
+      if (la - lh >= 0.55 && a > h) boost *= 1.08;
+      grid.push({ h, a, p, score: p * boost, total, margin });
+    }
+  }
+  grid.sort((a, b) => b.score - a.score || b.p - a.p);
+
+  const picked = [];
+  const seenTotal = new Set();
+  for (const g of grid) {
+    if (picked.length >= 3) break;
+    // 尽量让 3 个比分的总进球有差异，避免全是 1-x / x-1 小分
+    const totalKey = g.total;
+    if (picked.length >= 1 && seenTotal.has(totalKey) && picked.length < 2) continue;
+    if (picked.length === 2 && seenTotal.size < 2 && seenTotal.has(totalKey)) continue;
+    picked.push(g);
+    seenTotal.add(totalKey);
+  }
+  // 大球/大比分时保证至少一个总进球≥3
+  if ((/偏大球|偏大比分/.test(lean) || expected >= 2.9) && picked.every((x) => x.total < 3)) {
+    const big = grid.find((g) => g.total >= 3);
+    if (big) picked[picked.length - 1] = big;
+  }
+  return picked.map((s) => `${s.h}-${s.a}`).join("、") || "—";
 }
 
 /** 半场进球期望：主队主场上半 / 客队客场上半，辅以近况半场失球 */
@@ -1378,28 +1439,55 @@ function buildHalfTimeLambdas(match, form) {
   };
 }
 
-/** Excel「半场预测」：半场胜平负 + 半场比分，基于双方半场进球历史 */
-function buildExcelHalfLabel(match, form) {
+const HTFT_CHAR = { home: "胜", draw: "平", away: "负" };
+
+/**
+ * Excel「半全场」：仅结果组合（胜胜/胜负/平胜…），无比分；最多两个最可能
+ */
+function buildExcelHalfFullLabel(match, form, scoreOutlook = null) {
   const ht = buildHalfTimeLambdas(match, form);
-  if (!ht) return "—";
-  const probs = outcomeProbsFromLambdas(ht.lambdaHome, ht.lambdaAway, 4);
-  const picked = pickOutcomeLabelFromProbs(probs, {
-    dual: true,
-    drawLabel: "平",
-    awayLabel: "负",
-  });
-  const scores = buildTopScorePicks(ht.lambdaHome, ht.lambdaAway, 3, 3);
-  const scoreText = scores.map((s) => `${s.home}-${s.away}`).join("、");
-  const halfOutcome = String(picked?.text || "—")
-    .split("、")
-    .map((p) => {
-      if (p === "主胜") return "半主";
-      if (p === "双平" || p === "平") return "半平";
-      if (p === "负" || p === "主负") return "半负";
-      return p;
-    })
-    .join("、");
-  return scoreText ? `${halfOutcome}、${scoreText}` : halfOutcome;
+  const ftProbs =
+    scoreOutlook?.lambdaHome != null && scoreOutlook?.lambdaAway != null
+      ? outcomeProbsFromLambdas(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway)
+      : null;
+  const htProbs = ht
+    ? outcomeProbsFromLambdas(ht.lambdaHome, ht.lambdaAway, 4)
+    : ftProbs
+      ? {
+          // 无半场样本时，半场略向平局倾斜的弱先验
+          home: ftProbs.home * 0.7,
+          draw: Math.min(0.45, ftProbs.draw * 1.25 + 0.08),
+          away: ftProbs.away * 0.7,
+        }
+      : null;
+  if (!htProbs || !ftProbs) return "—";
+  // 归一弱先验
+  const hs = htProbs.home + htProbs.draw + htProbs.away || 1;
+  const htN = {
+    home: htProbs.home / hs,
+    draw: htProbs.draw / hs,
+    away: htProbs.away / hs,
+  };
+
+  const combos = [];
+  for (const hk of ["home", "draw", "away"]) {
+    for (const fk of ["home", "draw", "away"]) {
+      let p = htN[hk] * ftProbs[fk];
+      if (hk === fk) p *= 1.18; // 半全场一致更常见
+      if (hk === "home" && fk === "away") p *= 0.78; // 半场领先终场翻盘较少
+      if (hk === "away" && fk === "home") p *= 0.78;
+      combos.push({
+        label: `${HTFT_CHAR[hk]}${HTFT_CHAR[fk]}`,
+        p,
+      });
+    }
+  }
+  combos.sort((a, b) => b.p - a.p);
+  const top = [combos[0]];
+  if (combos[1] && combos[0].p - combos[1].p < 0.12 && combos[1].p >= 0.08) {
+    top.push(combos[1]);
+  }
+  return top.map((c) => c.label).join("、");
 }
 
 function buildExcelBriefAnalysis(match, form, analysis, scoreOutlook = null) {

@@ -467,7 +467,7 @@ function canvasToPngBlob(canvas) {
   });
 }
 
-const EXCEL_HEADERS = ["场次编号", "联赛信息", "对战队伍", "简要分析", "胜负预测", "半场预测", "比分预测"];
+const EXCEL_HEADERS = ["场次编号", "联赛信息", "对战队伍", "简要分析", "胜负预测", "半全场", "比分预测"];
 const EXCEL_AVATAR_URL = new URL("../assets/excel-avatar.png", import.meta.url).href;
 const EXCEL_COL_COUNT = 7;
 const EXCEL_BORDER = {
@@ -520,42 +520,31 @@ function applyRowBorders(row, colCount = EXCEL_COL_COUNT) {
 }
 
 /**
- * 按列宽估算中文自动换行行数（偏保守，避免行高不够把内容「折叠」截断）
- * Excel 列宽单位约等于半角字符数；中文约占 2 个宽度单位。
+ * 按列宽估算中文自动换行行数（偏紧，减少行高虚高）
+ * 列宽单位约半角字符数；中文约 2 宽，但微软雅黑 10 号实际略密。
  */
 function estimateWrappedLines(text, colWidth) {
   const raw = String(text || "").trim();
   if (!raw) return 1;
-  const charsPerLine = Math.max(6, Math.floor(colWidth * 0.48));
-  let lines = 0;
-  for (const para of raw.split(/\n+/)) {
-    const len = [...para].length || 1;
-    lines += Math.max(1, Math.ceil(len / charsPerLine));
-  }
-  return Math.max(1, lines);
+  const charsPerLine = Math.max(10, Math.floor(colWidth * 0.72));
+  const len = [...raw.replace(/\n+/g, "")].length || 1;
+  return Math.max(1, Math.ceil(len / charsPerLine));
 }
 
-/** 简要分析按句号分段，便于换行展示、减少挤在一行被裁切 */
+/** 简要分析紧凑展示：不强制一句一行，减少空白 */
 function formatAnalysisForExcel(text) {
   return String(text || "")
     .replace(/\s+/g, "")
-    .replace(/([。！？；])/g, "$1\n")
-    .replace(/\n+/g, "\n")
-    .replace(/^\n+|\n+$/g, "");
+    .replace(/\n+/g, "")
+    .trim();
 }
 
+/** 行高紧贴简要分析内容，压掉上下留白 */
 function fitRowHeight(rowData, widths) {
   const analysis = formatAnalysisForExcel(rowData.analysis);
-  const lines = Math.max(
-    estimateWrappedLines(analysis, widths[3]),
-    estimateWrappedLines(rowData.matchup, widths[2]),
-    estimateWrappedLines(rowData.outcome, widths[4]),
-    estimateWrappedLines(rowData.half, widths[5]),
-    estimateWrappedLines(rowData.scores, widths[6]),
-    2
-  );
-  // 字号 10≈14pt/行，留少量边距；不再过度封顶导致内容折叠
-  return Math.min(320, Math.max(28, lines * 14 + 8));
+  const lines = Math.max(estimateWrappedLines(analysis, widths[3]), 1);
+  // 字号 10：约 10.5pt/行，几乎不额外加边距
+  return Math.min(110, Math.max(14, Math.ceil(lines * 10.5)));
 }
 
 export async function buildPredictionsWorkbook(rows) {
@@ -566,9 +555,16 @@ export async function buildPredictionsWorkbook(rows) {
     views: [{ state: "frozen", ySplit: 2 }],
   });
 
-  // 略加宽分析/对阵列，降低换行后被裁切风险
-  const widths = [12, 11, 22, 54, 12, 16, 18];
+  // 简要分析列适当放宽，阅读更舒服
+  const widths = [11, 10, 20, 72, 11, 12, 16];
+  // 垂直靠上，避免行高略大时上下对称留白显眼
   const centerMid = {
+    horizontal: "center",
+    vertical: "top",
+    wrapText: true,
+    shrinkToFit: false,
+  };
+  const centerMidShort = {
     horizontal: "center",
     vertical: "middle",
     wrapText: true,
@@ -599,7 +595,7 @@ export async function buildPredictionsWorkbook(rows) {
       },
     ],
   };
-  titleCell.alignment = centerMid;
+  titleCell.alignment = centerMidShort;
   applyRowBorders(titleRow);
 
   // 第 2 行：表头
@@ -608,9 +604,9 @@ export async function buildPredictionsWorkbook(rows) {
     const cell = header.getCell(i + 1);
     cell.value = text;
     cell.font = { name: "微软雅黑", bold: true, size: 11, color: { argb: "FF000000" } };
-    cell.alignment = centerMid;
+    cell.alignment = centerMidShort;
   });
-  header.height = 22;
+  header.height = 20;
   applyRowBorders(header);
 
   // 数据行：水平垂直居中；行高按完整内容估算，避免折叠截断
@@ -626,9 +622,10 @@ export async function buildPredictionsWorkbook(rows) {
       row.scores,
     ]);
     r.height = fitRowHeight({ ...row, analysis }, widths);
-    r.eachCell((cell) => {
+    r.eachCell((cell, colNumber) => {
       cell.font = { name: "微软雅黑", size: 10, color: { argb: "FF111827" } };
-      cell.alignment = centerMid;
+      // 简要分析靠上贴内容；其余列垂直居中
+      cell.alignment = colNumber === 4 ? centerMid : centerMidShort;
       cell.border = EXCEL_BORDER;
     });
     applyRowBorders(r);
@@ -701,19 +698,26 @@ function parsePredictedOutcomes(text) {
   return keys;
 }
 
-function parsePredictedHalfOutcomes(text) {
-  const keys = new Set();
+/** 解析半全场预测，如 胜胜、平负 */
+function parsePredictedHalfFull(text) {
+  const set = new Set();
   const parts = String(text || "")
     .split(/[、,，/｜|\s]+/)
     .map((s) => s.trim())
     .filter(Boolean);
   for (const p of parts) {
-    if (/^\d+[-:：]\d+$/.test(p)) continue;
-    if (/半主|半场主胜|^主胜$/.test(p)) keys.add("home");
-    else if (/半平|半场平|^平$|双平/.test(p)) keys.add("draw");
-    else if (/半负|半场.*负|^负$|主负/.test(p)) keys.add("away");
+    const m = p.match(/^([胜平负])([胜平负])$/);
+    if (m) set.add(`${m[1]}${m[2]}`);
   }
-  return keys;
+  return set;
+}
+
+function actualHalfFullLabel(match) {
+  const ht = actualHalfOutcomeKey(match);
+  const ft = actualOutcomeKey(match);
+  if (!ht || !ft) return null;
+  const map = { home: "胜", draw: "平", away: "负" };
+  return `${map[ht]}${map[ft]}`;
 }
 
 function parsePredictedScores(text) {
@@ -846,9 +850,9 @@ function resolveImportColumns(headerRow) {
     else if (/对战|对阵|队伍/.test(t)) map.matchup = col;
     else if (/简要分析/.test(t) || (/分析/.test(t) && !/每日分析/.test(t))) map.analysis = col;
     else if (/胜负预测|胜平负/.test(t)) map.outcome = col;
-    else if (/半场预测/.test(t)) map.half = col;
+    else if (/半全场|半场预测/.test(t)) map.half = col;
     else if (/比分预测/.test(t)) map.scores = col;
-    else if (/实际半场/.test(t)) map.actualHalf = col;
+    else if (/实际半全场|实际半场/.test(t)) map.actualHalf = col;
     else if (/实际赛果/.test(t)) map.actualOutcome = col;
     else if (/实际比分/.test(t)) map.actualScore = col;
   });
@@ -898,7 +902,7 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
   if (!/实际/.test(cellText(headerRow.getCell(cols.actualOutcome)))) {
     headerRow.getCell(cols.actualOutcome).value = "实际赛果";
     headerRow.getCell(cols.actualScore).value = "实际比分";
-    headerRow.getCell(cols.actualHalf).value = "实际半场";
+    headerRow.getCell(cols.actualHalf).value = "实际半全场";
     headerRow.getCell(cols.actualOutcome).font = { bold: true, name: "微软雅黑" };
     headerRow.getCell(cols.actualScore).font = { bold: true, name: "微软雅黑" };
     headerRow.getCell(cols.actualHalf).font = { bold: true, name: "微软雅黑" };
@@ -968,14 +972,8 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
       scoreHits += 1;
     }
     if (halfCell && halfText && halfText !== "—") {
-      const halfScores = parsePredictedScores(halfText);
-      const htDash =
-        match.homeHtScore != null ? `${Number(match.homeHtScore)}-${Number(match.awayHtScore)}` : "";
-      const htColon =
-        match.homeHtScore != null ? `${Number(match.homeHtScore)}:${Number(match.awayHtScore)}` : "";
-      const halfOutcomeHit = actualHalfKey && parsePredictedHalfOutcomes(halfText).has(actualHalfKey);
-      const halfScoreHit = htDash && (halfScores.has(htDash) || halfScores.has(htColon));
-      if (halfOutcomeHit || halfScoreHit) {
+      const actualHf = actualHalfFullLabel(match);
+      if (actualHf && parsePredictedHalfFull(halfText).has(actualHf)) {
         markHit(halfCell);
         halfHits += 1;
       }
@@ -984,20 +982,10 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
 
     const label =
       actualKey === "home" ? "主胜" : actualKey === "away" ? "主负" : actualKey === "draw" ? "平局" : "";
-    const halfLabel =
-      actualHalfKey === "home"
-        ? "半主"
-        : actualHalfKey === "away"
-          ? "半负"
-          : actualHalfKey === "draw"
-            ? "半平"
-            : "";
+    const halfFull = actualHalfFullLabel(match);
     row.getCell(cols.actualOutcome).value = label;
     row.getCell(cols.actualScore).value = actualScoreColon;
-    row.getCell(cols.actualHalf).value =
-      halfLabel && match.homeHtScore != null
-        ? `${halfLabel} ${match.homeHtScore}:${match.awayHtScore}`
-        : halfLabel || "无半场";
+    row.getCell(cols.actualHalf).value = halfFull || (actualHalfKey == null ? "无半场" : "");
     row.getCell(cols.actualOutcome).border = EXCEL_BORDER;
     row.getCell(cols.actualScore).border = EXCEL_BORDER;
     row.getCell(cols.actualHalf).border = EXCEL_BORDER;
