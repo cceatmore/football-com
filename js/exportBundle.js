@@ -544,11 +544,11 @@ export async function buildPredictionsWorkbook(rows) {
   titleCell.value = {
     richText: [
       {
-        font: { name: "微软雅黑", size: 20, bold: true, color: { argb: "FF000000" } },
+        font: { name: "微软雅黑", size: 20, bold: true, color: { argb: "FFFF0000" } },
         text: "cc体育每日分析",
       },
       {
-        font: { name: "微软雅黑", size: 11, bold: false, color: { argb: "FF000000" } },
+        font: { name: "微软雅黑", size: 11, bold: false, color: { argb: "FFFF0000" } },
         text: "\n推荐仅供娱乐参考",
       },
     ],
