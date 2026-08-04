@@ -526,7 +526,7 @@ export async function buildPredictionsWorkbook(rows) {
     views: [{ state: "frozen", ySplit: 2 }],
   });
 
-  const widths = [12, 12, 28, 56, 14, 22];
+  const widths = [12, 12, 28, 68, 14, 22];
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w;
     ws.getColumn(i + 1).key = ["num", "league", "matchup", "analysis", "outcome", "scores"][i];
@@ -582,7 +582,7 @@ export async function buildPredictionsWorkbook(rows) {
     r.getCell(2).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
     r.getCell(5).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
     r.getCell(6).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    r.height = Math.min(120, 36 + Math.ceil(String(row.analysis || "").length / 28) * 14);
+    r.height = Math.min(180, 42 + Math.ceil(String(row.analysis || "").length / 26) * 15);
     r.eachCell((cell) => {
       cell.font = { name: "微软雅黑", size: 11, color: { argb: "FF111827" } };
       cell.border = EXCEL_BORDER;

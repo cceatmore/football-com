@@ -438,7 +438,7 @@ async function collectMatchExportData(match, onProgress) {
       num: match.num || String(match.id),
       league: match.leagueShort || match.league || "",
       matchup: `${match.home} VS ${match.away}`,
-      analysis: buildExcelBriefAnalysis(match, form, analysis),
+      analysis: buildExcelBriefAnalysis(match, form, analysis, scoreOutlook),
       outcome: buildExcelOutcomeLabel(analysis, scoreOutlook),
       scores: buildExcelScoreLabel(scoreOutlook),
     },
@@ -1271,35 +1271,129 @@ function buildExcelScoreLabel(scoreOutlook) {
   return top.map((s) => `${s.home}-${s.away}`).join("、");
 }
 
-function buildExcelBriefAnalysis(match, form, analysis) {
+function buildExcelBriefAnalysis(match, form, analysis, scoreOutlook = null) {
   const parts = [];
+  const home = match.home;
+  const away = match.away;
+  const league = match.leagueShort || match.league || "";
+
+  if (league) {
+    parts.push(`${league}${analysis?.stakes?.isCup || /杯|cup/i.test(league) ? "（杯赛属性，临场或有轮换）" : ""}`);
+  }
+
   if (match.homeRank != null || match.awayRank != null) {
     parts.push(
-      `主队${match.home}排名第${match.homeRank ?? "?"}，客队${match.away}排名第${match.awayRank ?? "?"}`
+      `积分排名：主队${home}第${match.homeRank ?? "?"}，客队${away}第${match.awayRank ?? "?"}${
+        match.homeRank != null && match.awayRank != null
+          ? match.homeRank < match.awayRank
+            ? "，主队排名占优"
+            : match.awayRank < match.homeRank
+              ? "，客队排名占优"
+              : "，双方排名接近"
+          : ""
+      }`
     );
   }
-  if (form?.home?.length) parts.push(`主队近10场${formStatText(form.home, match.home)}`);
-  if (form?.away?.length) parts.push(`客队近10场${formStatText(form.away, match.away)}`);
 
+  if (form?.home?.length) parts.push(`主队近10场${formStatText(form.home, home)}`);
+  if (form?.away?.length) parts.push(`客队近10场${formStatText(form.away, away)}`);
+
+  // 主客场进球结构
+  const homeVenue =
+    scoreOutlook?.homeAtHome ||
+    teamGoalsStats(form?.scoreHome || form?.home || [], home, { venue: "home" });
+  const awayVenue =
+    scoreOutlook?.awayAtAway ||
+    teamGoalsStats(form?.scoreAway || form?.away || [], away, { venue: "away" });
+  if (homeVenue?.n) {
+    parts.push(
+      `主队主场近${homeVenue.n}场场均进${homeVenue.avgFor.toFixed(1)}失${homeVenue.avgAgainst.toFixed(1)}，大球率${Math.round((homeVenue.over25Rate || 0) * 100)}%`
+    );
+  }
+  if (awayVenue?.n) {
+    parts.push(
+      `客队客场近${awayVenue.n}场场均进${awayVenue.avgFor.toFixed(1)}失${awayVenue.avgAgainst.toFixed(1)}，大球率${Math.round((awayVenue.over25Rate || 0) * 100)}%`
+    );
+  }
+
+  if (scoreOutlook && !scoreOutlook.pending) {
+    const bits = [];
+    if (scoreOutlook.lambdaHome != null && scoreOutlook.lambdaAway != null) {
+      bits.push(
+        `期望进球约主${scoreOutlook.lambdaHome.toFixed(2)}:客${scoreOutlook.lambdaAway.toFixed(2)}`
+      );
+    }
+    if (scoreOutlook.lean) bits.push(scoreOutlook.lean);
+    if (scoreOutlook.over25 != null) bits.push(`大2.5约${Math.round(scoreOutlook.over25 * 100)}%`);
+    if (scoreOutlook.btts != null) bits.push(`双方进球约${Math.round(scoreOutlook.btts * 100)}%`);
+    if (bits.length) parts.push(`进球走势：${bits.join("，")}`);
+  }
+
+  // 比赛节奏
+  const tempo = form?.tempoStyle;
+  if (tempo?.matchup) {
+    parts.push(`节奏风格：${tempo.matchup.replace(/。$/, "")}`);
+  } else if (tempo?.tips?.length) {
+    parts.push(`节奏风格：${tempo.tips.join("；")}`);
+  }
+
+  // 伤停（含位置）
   const inj = analysis?.injury;
-  if (inj?.home?.total) parts.push(`主队${inj.home.total}名主力伤停`);
-  if (inj?.away?.total) parts.push(`客队${inj.away.total}名主力伤停`);
+  if (inj?.home?.total) {
+    const detail = inj.home.lines?.length ? `（${inj.home.lines.join("、")}）` : "";
+    parts.push(`主队主力伤停${inj.home.total}人${detail}`);
+  } else if (inj && !inj.home?.total) {
+    parts.push("主队暂无明显主力伤停");
+  }
+  if (inj?.away?.total) {
+    const detail = inj.away.lines?.length ? `（${inj.away.lines.join("、")}）` : "";
+    parts.push(`客队主力伤停${inj.away.total}人${detail}`);
+  } else if (inj && !inj.away?.total) {
+    parts.push("客队暂无明显主力伤停");
+  }
 
+  // 赛果影响 / 积分形势
   const stakes = analysis?.stakes;
-  if (stakes?.isCup) parts.push("杯赛对阵，双方可能轮换");
-  else if (stakes?.bullets?.[1]) parts.push(stakes.bullets[1].replace(/^积分形势：/, ""));
+  if (stakes?.bullets?.length) {
+    for (const b of stakes.bullets.slice(0, 3)) {
+      if (b) parts.push(String(b).replace(/^积分形势：/, ""));
+    }
+  } else if (stakes?.isCup) {
+    parts.push("杯赛对阵，赢球偏晋级、输球风险更大，双方或有轮换");
+  }
+  if (stakes?.home?.acceptDrawNote) parts.push(`${home}：${stakes.home.acceptDrawNote}`);
+  if (stakes?.away?.acceptDrawNote) parts.push(`${away}：${stakes.away.acceptDrawNote}`);
 
-  if (form?.commonOpponents?.summary?.counted) {
-    parts.push(form.commonOpponents.summary.text);
+  // 共同对手
+  const common = form?.commonOpponents;
+  if (common?.summary?.counted) {
+    parts.push(common.summary.text);
+    for (const it of (common.items || []).slice(0, 2)) {
+      if (it?.note) parts.push(`对${it.opponent}：${it.note}`);
+    }
   }
 
   const agency = (analysis?.sources || []).filter((s) => !s.local);
-  if (agency.length && analysis?.consensus?.bullets?.[0]) {
-    parts.push(analysis.consensus.bullets[0]);
+  if (agency.length) {
+    if (analysis?.consensus?.bullets?.[0]) parts.push(analysis.consensus.bullets[0]);
+    const tip = agency.find((s) => s.tipText)?.tipText;
+    if (tip) {
+      const short = String(tip).replace(/\s+/g, " ").slice(0, 80);
+      parts.push(`机构摘要：${short}${tip.length > 80 ? "…" : ""}`);
+    }
   }
 
   if (!parts.length) return "情报样本不足，请结合临场信息判断。";
-  return `${parts.slice(0, 5).join("。")}。`;
+  // 去重并保留较完整叙述
+  const uniq = [];
+  const seen = new Set();
+  for (const p of parts) {
+    const key = p.replace(/\s+/g, "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(p);
+  }
+  return `${uniq.slice(0, 12).join("。")}。`;
 }
 
 function blendRate(formRate, webRate, formWeight = 0.6) {
