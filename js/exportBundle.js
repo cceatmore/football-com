@@ -483,10 +483,14 @@ async function loadAvatarBuffer() {
   return res.arrayBuffer();
 }
 
-/** 生成倾斜粉色水印 PNG（透明底，浮于表格之上，不锁定单元格） */
+/**
+ * 生成单个倾斜粉色水印 PNG（透明底）。
+ * 用作工作表背景图：在单元格之下，不挡鼠标、不影响编辑。
+ * 画布足够大，减少 Excel 背景平铺导致满屏重复。
+ */
 async function createWatermarkBuffer() {
-  const w = 1800;
-  const h = 2400;
+  const w = 2400;
+  const h = 3200;
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
@@ -497,16 +501,9 @@ async function createWatermarkBuffer() {
   ctx.rotate((-28 * Math.PI) / 180);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.font = `700 64px ${FONT}`;
-  ctx.fillStyle = "rgba(244, 114, 182, 0.22)"; // 粉色半透明
-  const text = "cc体育预测";
-  const stepX = 320;
-  const stepY = 160;
-  for (let y = -h; y <= h; y += stepY) {
-    for (let x = -w; x <= w; x += stepX) {
-      ctx.fillText(text, x, y);
-    }
-  }
+  ctx.font = `700 96px ${FONT}`;
+  ctx.fillStyle = "rgba(244, 114, 182, 0.28)";
+  ctx.fillText("cc体育预测", 0, 0);
   ctx.restore();
 
   const blob = await new Promise((resolve, reject) => {
@@ -554,11 +551,7 @@ export async function buildPredictionsWorkbook(rows) {
     ],
   };
   titleCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-  titleCell.fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: "FFF8FAFC" },
-  };
+  // 不设实心底色，以便工作表背景水印透出
   applyRowBorders(titleRow);
 
   try {
@@ -585,11 +578,7 @@ export async function buildPredictionsWorkbook(rows) {
     const cell = header.getCell(i + 1);
     cell.value = text;
     cell.font = { name: "微软雅黑", bold: true, size: 12, color: { argb: "FF000000" } };
-    cell.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FFE5E7EB" },
-    };
+    // 表头也不铺实心色，避免盖住背景水印
     cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
   });
   header.height = 24;
@@ -611,19 +600,14 @@ export async function buildPredictionsWorkbook(rows) {
     applyRowBorders(r);
   }
 
-  // 整表粉色倾斜水印（浮层图片，不锁定单元格，可照常改数据）
+  // 粉色倾斜水印：作为工作表背景（单元格下方），不在最上层，不影响编辑
   try {
     const wmBuf = await createWatermarkBuffer();
     const wmId = wb.addImage({
       buffer: wmBuf,
       extension: "png",
     });
-    const lastRow = Math.max(ws.rowCount, 2);
-    ws.addImage(wmId, {
-      tl: { col: 0, row: 0 },
-      br: { col: EXCEL_COL_COUNT, row: lastRow },
-      editAs: "absolute",
-    });
+    ws.addBackgroundImage(wmId);
   } catch (err) {
     console.warn("Excel 水印未写入", err);
   }
