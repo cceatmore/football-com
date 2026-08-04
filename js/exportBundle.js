@@ -484,13 +484,12 @@ async function loadAvatarBuffer() {
 }
 
 /**
- * 生成单个倾斜粉色水印 PNG（透明底）。
- * 用作工作表背景图：在单元格之下，不挡鼠标、不影响编辑。
- * 画布足够大，减少 Excel 背景平铺导致满屏重复。
+ * 生成单个倾斜粉色水印 PNG（透明底，仅一个「cc体育预测」）。
+ * 后续按表格占用范围锚定，不铺满整张工作表。
  */
-async function createWatermarkBuffer() {
-  const w = 2400;
-  const h = 3200;
+async function createWatermarkBuffer(pixelW = 1200, pixelH = 1600) {
+  const w = Math.max(600, Math.round(pixelW));
+  const h = Math.max(800, Math.round(pixelH));
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
@@ -501,8 +500,9 @@ async function createWatermarkBuffer() {
   ctx.rotate((-28 * Math.PI) / 180);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.font = `700 96px ${FONT}`;
-  ctx.fillStyle = "rgba(244, 114, 182, 0.28)";
+  const fontSize = Math.max(48, Math.min(96, Math.floor(Math.min(w, h) / 10)));
+  ctx.font = `700 ${fontSize}px ${FONT}`;
+  ctx.fillStyle = "rgba(244, 114, 182, 0.26)";
   ctx.fillText("cc体育预测", 0, 0);
   ctx.restore();
 
@@ -551,26 +551,12 @@ export async function buildPredictionsWorkbook(rows) {
     ],
   };
   titleCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-  // 不设实心底色，以便工作表背景水印透出
+  titleCell.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFF8FAFC" },
+  };
   applyRowBorders(titleRow);
-
-  try {
-    const avatarBuf = await loadAvatarBuffer();
-    const imageId = wb.addImage({
-      buffer: avatarBuf,
-      extension: "png",
-    });
-    // 红框位置：标题行左侧；高度接近填满标题行，宽度按 1:1 宽高比
-    const avatarPx = Math.round((TITLE_ROW_PT * 96) / 72) - 6;
-    const vPadFrac = 3 / TITLE_ROW_PT;
-    ws.addImage(imageId, {
-      tl: { col: 0.22, row: vPadFrac },
-      ext: { width: avatarPx, height: avatarPx },
-      editAs: "oneCell",
-    });
-  } catch (err) {
-    console.warn("Excel 头像未写入", err);
-  }
 
   // 第 2 行：表头
   const header = ws.getRow(2);
@@ -578,7 +564,11 @@ export async function buildPredictionsWorkbook(rows) {
     const cell = header.getCell(i + 1);
     cell.value = text;
     cell.font = { name: "微软雅黑", bold: true, size: 12, color: { argb: "FF000000" } };
-    // 表头也不铺实心色，避免盖住背景水印
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FFE5E7EB" },
+    };
     cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
   });
   header.height = 24;
@@ -600,16 +590,45 @@ export async function buildPredictionsWorkbook(rows) {
     applyRowBorders(r);
   }
 
-  // 粉色倾斜水印：作为工作表背景（单元格下方），不在最上层，不影响编辑
+  const lastRow = Math.max(ws.rowCount, 2);
+
+  // 粉色倾斜水印：严格锚定在表格范围 A1:F末行，仅一个倾斜字样
   try {
-    const wmBuf = await createWatermarkBuffer();
+    const approxW = widths.reduce((s, w) => s + w, 0) * 8;
+    let approxH = 0;
+    for (let r = 1; r <= lastRow; r += 1) {
+      approxH += ((ws.getRow(r).height || 18) * 96) / 72;
+    }
+    const wmBuf = await createWatermarkBuffer(approxW, approxH);
     const wmId = wb.addImage({
       buffer: wmBuf,
       extension: "png",
     });
-    ws.addBackgroundImage(wmId);
+    ws.addImage(wmId, {
+      tl: { col: 0, row: 0 },
+      br: { col: EXCEL_COL_COUNT, row: lastRow },
+      editAs: "oneCell",
+    });
   } catch (err) {
     console.warn("Excel 水印未写入", err);
+  }
+
+  // 头像后加，保证叠在水印之上且位于标题行左侧
+  try {
+    const avatarBuf = await loadAvatarBuffer();
+    const imageId = wb.addImage({
+      buffer: avatarBuf,
+      extension: "png",
+    });
+    const avatarPx = Math.round((TITLE_ROW_PT * 96) / 72) - 6;
+    const vPadFrac = 3 / TITLE_ROW_PT;
+    ws.addImage(imageId, {
+      tl: { col: 0.22, row: vPadFrac },
+      ext: { width: avatarPx, height: avatarPx },
+      editAs: "oneCell",
+    });
+  } catch (err) {
+    console.warn("Excel 头像未写入", err);
   }
 
   const buf = await wb.xlsx.writeBuffer();
