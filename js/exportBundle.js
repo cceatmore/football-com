@@ -484,12 +484,13 @@ async function loadAvatarBuffer() {
 }
 
 /**
- * 生成单个倾斜粉色水印 PNG（透明底，仅一个「cc体育预测」）。
- * 后续按表格占用范围锚定，不铺满整张工作表。
+ * 生成单个倾斜粉色水印（透明底）。
+ * 用作工作表背景：在单元格之下，双击可直接编辑，不会点到图片。
+ * 画布按表格像素尺寸生成，尽量让首个平铺块覆盖表格区域。
  */
 async function createWatermarkBuffer(pixelW = 1200, pixelH = 1600) {
-  const w = Math.max(600, Math.round(pixelW));
-  const h = Math.max(800, Math.round(pixelH));
+  const w = Math.max(800, Math.round(pixelW));
+  const h = Math.max(900, Math.round(pixelH));
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
@@ -500,9 +501,9 @@ async function createWatermarkBuffer(pixelW = 1200, pixelH = 1600) {
   ctx.rotate((-28 * Math.PI) / 180);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const fontSize = Math.max(48, Math.min(96, Math.floor(Math.min(w, h) / 10)));
+  const fontSize = Math.max(52, Math.min(88, Math.floor(Math.min(w, h) / 12)));
   ctx.font = `700 ${fontSize}px ${FONT}`;
-  ctx.fillStyle = "rgba(244, 114, 182, 0.26)";
+  ctx.fillStyle = "rgba(244, 114, 182, 0.24)";
   ctx.fillText("cc体育预测", 0, 0);
   ctx.restore();
 
@@ -518,6 +519,26 @@ function applyRowBorders(row, colCount = EXCEL_COL_COUNT) {
   }
 }
 
+/** 按列宽估算中文换行行数，压缩行高、减少空白 */
+function estimateWrappedLines(text, colWidth) {
+  const raw = String(text || "");
+  if (!raw) return 1;
+  // Excel 列宽约可容纳 colWidth 个半角；中文约按 1.7 折算
+  const charsPerLine = Math.max(8, Math.floor(colWidth / 1.7));
+  let lines = 0;
+  for (const para of raw.split(/\n+/)) {
+    const len = [...para].length || 1;
+    lines += Math.max(1, Math.ceil(len / charsPerLine));
+  }
+  return Math.max(1, lines);
+}
+
+function compactRowHeight(analysisText, analysisColWidth) {
+  const lines = estimateWrappedLines(analysisText, analysisColWidth);
+  // 每行约 13pt，上下各留 2pt，封顶避免过高
+  return Math.min(120, Math.max(20, lines * 13 + 4));
+}
+
 export async function buildPredictionsWorkbook(rows) {
   const { ExcelJS } = await loadDeps();
   const wb = new ExcelJS.Workbook();
@@ -526,14 +547,16 @@ export async function buildPredictionsWorkbook(rows) {
     views: [{ state: "frozen", ySplit: 2 }],
   });
 
-  const widths = [12, 12, 28, 68, 14, 22];
+  const widths = [11, 10, 22, 56, 12, 18];
+  const centerMid = { horizontal: "center", vertical: "middle", wrapText: true, shrinkToFit: false };
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w;
     ws.getColumn(i + 1).key = ["num", "league", "matchup", "analysis", "outcome", "scores"][i];
+    ws.getColumn(i + 1).alignment = centerMid;
   });
 
   // 第 1 行：标题区（合并居中 + 左侧头像）
-  const TITLE_ROW_PT = 78;
+  const TITLE_ROW_PT = 64;
   ws.mergeCells(1, 1, 1, EXCEL_COL_COUNT);
   const titleRow = ws.getRow(1);
   titleRow.height = TITLE_ROW_PT;
@@ -541,21 +564,17 @@ export async function buildPredictionsWorkbook(rows) {
   titleCell.value = {
     richText: [
       {
-        font: { name: "微软雅黑", size: 20, bold: true, color: { argb: "FFFF0000" } },
+        font: { name: "微软雅黑", size: 18, bold: true, color: { argb: "FFFF0000" } },
         text: "cc体育每日分析",
       },
       {
-        font: { name: "微软雅黑", size: 11, bold: false, color: { argb: "FFFF0000" } },
+        font: { name: "微软雅黑", size: 10, bold: false, color: { argb: "FFFF0000" } },
         text: "\n推荐仅供娱乐参考",
       },
     ],
   };
-  titleCell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
-  titleCell.fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: "FFF8FAFC" },
-  };
+  titleCell.alignment = centerMid;
+  // 不铺实心底色，让背景水印可透出；边框保留表格感
   applyRowBorders(titleRow);
 
   // 第 2 行：表头
@@ -563,28 +582,19 @@ export async function buildPredictionsWorkbook(rows) {
   EXCEL_HEADERS.forEach((text, i) => {
     const cell = header.getCell(i + 1);
     cell.value = text;
-    cell.font = { name: "微软雅黑", bold: true, size: 12, color: { argb: "FF000000" } };
-    cell.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FFE5E7EB" },
-    };
-    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+    cell.font = { name: "微软雅黑", bold: true, size: 11, color: { argb: "FF000000" } };
+    cell.alignment = centerMid;
   });
-  header.height = 24;
+  header.height = 20;
   applyRowBorders(header);
 
-  // 数据行（从第 3 行起）
+  // 数据行（从第 3 行起）：水平垂直居中，按内容压行高
   for (const row of rows) {
     const r = ws.addRow([row.num, row.league, row.matchup, row.analysis, row.outcome, row.scores]);
-    r.alignment = { vertical: "top", wrapText: true, horizontal: "left" };
-    r.getCell(1).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    r.getCell(2).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    r.getCell(5).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    r.getCell(6).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    r.height = Math.min(180, 42 + Math.ceil(String(row.analysis || "").length / 26) * 15);
+    r.height = compactRowHeight(row.analysis, widths[3]);
     r.eachCell((cell) => {
-      cell.font = { name: "微软雅黑", size: 11, color: { argb: "FF111827" } };
+      cell.font = { name: "微软雅黑", size: 10, color: { argb: "FF111827" } };
+      cell.alignment = centerMid;
       cell.border = EXCEL_BORDER;
     });
     applyRowBorders(r);
@@ -592,38 +602,35 @@ export async function buildPredictionsWorkbook(rows) {
 
   const lastRow = Math.max(ws.rowCount, 2);
 
-  // 粉色倾斜水印：严格锚定在表格范围 A1:F末行，仅一个倾斜字样
+  // 水印：工作表背景（单元格下方），双击编辑不会点到图片
   try {
     const approxW = widths.reduce((s, w) => s + w, 0) * 8;
     let approxH = 0;
     for (let r = 1; r <= lastRow; r += 1) {
       approxH += ((ws.getRow(r).height || 18) * 96) / 72;
     }
-    const wmBuf = await createWatermarkBuffer(approxW, approxH);
+    // 画布略大于表格，降低平铺后表格内出现第二个水印的概率
+    const wmBuf = await createWatermarkBuffer(approxW * 1.05, approxH * 1.08);
     const wmId = wb.addImage({
       buffer: wmBuf,
       extension: "png",
     });
-    ws.addImage(wmId, {
-      tl: { col: 0, row: 0 },
-      br: { col: EXCEL_COL_COUNT, row: lastRow },
-      editAs: "oneCell",
-    });
+    ws.addBackgroundImage(wmId);
   } catch (err) {
     console.warn("Excel 水印未写入", err);
   }
 
-  // 头像后加，保证叠在水印之上且位于标题行左侧
+  // 头像仅占标题行一角；浮动图只影响标题区点击
   try {
     const avatarBuf = await loadAvatarBuffer();
     const imageId = wb.addImage({
       buffer: avatarBuf,
       extension: "png",
     });
-    const avatarPx = Math.round((TITLE_ROW_PT * 96) / 72) - 6;
-    const vPadFrac = 3 / TITLE_ROW_PT;
+    const avatarPx = Math.round((TITLE_ROW_PT * 96) / 72) - 4;
+    const vPadFrac = 2 / TITLE_ROW_PT;
     ws.addImage(imageId, {
-      tl: { col: 0.22, row: vPadFrac },
+      tl: { col: 0.18, row: vPadFrac },
       ext: { width: avatarPx, height: avatarPx },
       editAs: "oneCell",
     });
