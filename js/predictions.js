@@ -157,7 +157,7 @@ const PRIORITY_TIP_SITES = [
 
 const cache = new Map();
 /** 预测结果结构版本；变更后自动丢弃旧缓存（避免串场摘要残留） */
-export const ANALYSIS_SCHEMA = 10;
+export const ANALYSIS_SCHEMA = 11;
 
 /** 赔率/资讯站，不做预测摘要 */
 const BLOCKED_HOSTS = [
@@ -336,32 +336,6 @@ function oddsToImpliedProbs(odds) {
   if (![ih, id, ia].every((n) => Number.isFinite(n) && n > 0)) return null;
   const sum = ih + id + ia;
   return { home: ih / sum, draw: id / sum, away: ia / sum };
-}
-
-function buildOddsSource(match) {
-  const probs = oddsToImpliedProbs(match?.odds);
-  if (!probs) return null;
-  const pick = pickOutcome(probs);
-  const line = match.hhad?.line;
-  const extras = [];
-  if (line) extras.push(`让球 ${line}`);
-  const tipText = formatChineseTip(pick.key, probs, extras);
-  const favoredTeam = pick.key === "home" ? match.home : pick.key === "away" ? match.away : null;
-  const leanNote = favoredTeam
-    ? `市场更看好${favoredTeam}（隐含概率约 ${pct(pick.prob)}）`
-    : `市场倾向平局（隐含概率约 ${pct(pick.prob)}）`;
-  return {
-    name: "体彩市场赔率",
-    url: "",
-    title: `${match.home}对阵${match.away} · 赔率隐含倾向`,
-    tipText: `${leanNote}。${tipText}`,
-    pick: { ...pick },
-    probs,
-    goals: null,
-    trusted: true,
-    local: true,
-    sourceKind: "odds",
-  };
 }
 
 function isCupCompetition(match) {
@@ -1419,7 +1393,6 @@ function isValidTipSource(s) {
 export async function fetchWebPredictions(match) {
   const homeNames = teamSearchNames(match.home);
   const awayNames = teamSearchNames(match.away);
-  const oddsSource = buildOddsSource(match);
 
   // 1) 优先直连预测站联赛页（通常数秒内出结果）
   let results = await fetchDirectTipCandidates(match);
@@ -1460,21 +1433,9 @@ export async function fetchWebPredictions(match) {
     }
   }
 
-  // 机构观点在前，赔率本地源垫底（保证永不空）
-  const merged = [...sources];
-  if (oddsSource) merged.push(oddsSource);
-  const finalSources = merged.slice(0, 5);
-  const agencyOnly = finalSources.filter((s) => !s.local);
-  const consensus = buildConsensus(agencyOnly.length ? agencyOnly : finalSources);
-  if (!agencyOnly.length && oddsSource) {
-    consensus.name = "市场赔率倾向";
-    consensus.tagline = "机构页暂不可用，已用体彩隐含概率";
-    consensus.bullets = [
-      oddsSource.tipText.split("。")[0],
-      `分布：主胜 ${pct(oddsSource.probs.home)} · 平局 ${pct(oddsSource.probs.draw)} · 主负 ${pct(oddsSource.probs.away)}`,
-      "可稍后重试以补充外部机构摘要",
-    ];
-  }
+  // 仅聚合真实机构观点；无机构时不回退体彩隐含概率，避免干扰判断
+  const finalSources = sources.slice(0, 5);
+  const consensus = buildConsensus(finalSources);
 
   return { consensus, sources: finalSources };
 }
@@ -1499,7 +1460,13 @@ function buildAnalysisPayload(
   match,
   web,
   injury,
-  { complete = true, injuryPending = false, stakesPending = false, stakes = null } = {}
+  {
+    complete = true,
+    injuryPending = false,
+    stakesPending = false,
+    webPending = false,
+    stakes = null,
+  } = {}
 ) {
   return {
     schema: ANALYSIS_SCHEMA,
@@ -1508,6 +1475,7 @@ function buildAnalysisPayload(
     complete,
     injuryPending,
     stakesPending,
+    webPending,
     stakes: stakes || buildMatchStakes(match, null),
     consensus: web.consensus,
     sources: web.sources,
@@ -1523,23 +1491,13 @@ function buildAnalysisPayload(
   };
 }
 
-function buildLocalOddsWeb(match) {
-  const oddsSource = buildOddsSource(match);
-  const sources = oddsSource ? [oddsSource] : [];
-  const consensus = buildConsensus(sources);
-  if (oddsSource) {
-    consensus.name = "市场赔率倾向";
-    consensus.tagline = "先给出体彩隐含概率，机构摘要加载中…";
-    consensus.bullets = [
-      oddsSource.tipText.split("。")[0],
-      `分布：主胜 ${pct(oddsSource.probs.home)} · 平局 ${pct(oddsSource.probs.draw)} · 主负 ${pct(oddsSource.probs.away)}`,
-    ];
-  }
-  return { consensus, sources };
+function buildEmptyWeb() {
+  return { consensus: buildConsensus([]), sources: [] };
 }
 
 /**
- * 先秒出赔率倾向 + 赛果影响骨架，再补机构摘要 / 积分形势 / 伤停。
+ * 先出赛果影响骨架，再补机构摘要 / 积分形势 / 伤停。
+ * 无机构观点时不展示体彩隐含概率。
  * @param {{ onUpdate?: (analysis: object) => void }} [options]
  */
 export async function fetchAndAnalyzeMatch(match, options = {}) {
@@ -1547,13 +1505,14 @@ export async function fetchAndAnalyzeMatch(match, options = {}) {
   const cached = cache.get(match.id);
   if (cached?.schema === ANALYSIS_SCHEMA && cached.complete) return cached;
 
-  // 首屏：赔率秒出（无网络等待）
-  let web = buildLocalOddsWeb(match);
+  // 首屏：不展示赔率倾向，等机构摘要
+  let web = buildEmptyWeb();
   let stakes = buildMatchStakes(match, null);
   let analysis = buildAnalysisPayload(match, web, null, {
     complete: false,
     injuryPending: true,
     stakesPending: true,
+    webPending: true,
     stakes,
   });
   cache.set(match.id, analysis);
@@ -1572,6 +1531,7 @@ export async function fetchAndAnalyzeMatch(match, options = {}) {
     complete: false,
     injuryPending: true,
     stakesPending: false,
+    webPending: false,
     stakes,
   });
   cache.set(match.id, analysis);
@@ -1583,10 +1543,17 @@ export async function fetchAndAnalyzeMatch(match, options = {}) {
       complete: true,
       injuryPending: false,
       stakesPending: false,
+      webPending: false,
       stakes,
     });
   } catch {
-    analysis = { ...analysis, complete: true, injuryPending: false, stakesPending: false };
+    analysis = {
+      ...analysis,
+      complete: true,
+      injuryPending: false,
+      stakesPending: false,
+      webPending: false,
+    };
   }
   cache.set(match.id, analysis);
   onUpdate?.(analysis);
@@ -1668,14 +1635,16 @@ export function outcomeClass(key) {
   return "draw";
 }
 
-export function webSourcesHtml(sources = []) {
-  const list = sources || [];
-  const agency = list.filter((s) => !s.local);
-  if (!agency.length && !list.length) {
-    return `<div class="prediction-source-card"><p class="injury-empty">暂无外部机构摘要；上方已展示市场赔率倾向，可稍后重试。</p></div>`;
+export function webSourcesHtml(sources = [], { pending = false } = {}) {
+  const agency = (sources || []).filter((s) => !s.local);
+  if (!agency.length) {
+    const note = pending
+      ? "机构摘要加载中…"
+      : "暂无外部机构摘要，可稍后重试。";
+    return `<div class="prediction-source-card"><p class="injury-empty">${note}</p></div>`;
   }
 
-  return list
+  return agency
     .map((src) => {
       const pickBadge = src.pick
         ? `<span class="prediction-source-pick prediction-source-pick--${outcomeClass(src.pick.key)}">${src.pick.label || src.pick.short}</span>`
@@ -1685,7 +1654,7 @@ export function webSourcesHtml(sources = []) {
         <div class="prediction-source-header">
           <div>
             <div class="prediction-source-name">${src.name}</div>
-            <div class="prediction-source-tag">${src.title || (src.local ? "本地市场推算" : "机构预测观点")}</div>
+            <div class="prediction-source-tag">${src.title || "机构预测观点"}</div>
           </div>
           ${pickBadge}
         </div>

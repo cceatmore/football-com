@@ -3,7 +3,6 @@ import {
   fetchLatestLotteryData,
   startAutoDataRefresh,
   filterByDays,
-  filterPastDays,
   sortMatchesByTime,
   getFinishedLotteryMatches,
   getTeamMatches,
@@ -16,6 +15,7 @@ import { computeAllStandings, getTeamGroupRank } from "./standings.js";
 import { leagueBadgeHtml, teamLabel, isRealTeam, formatRank, flagHtml } from "./teams.js";
 import {
   fetchAndAnalyzeMatch,
+  fetchInjuryAnalysis,
   clearPredictionCache,
   ANALYSIS_SCHEMA,
   probBarHtml,
@@ -43,11 +43,22 @@ import {
   COMMON_OPPONENT_MATCH_LIMIT,
 } from "./matchHistory.js";
 import { fetchStandingsForMatches, fetchLeagueStandingsByMatch, clearLeagueStandingsCache } from "./leagueStandings.js";
+import {
+  renderRecentFormImage,
+  renderCommonOpponentsImage,
+  buildPredictionsWorkbook,
+  gradeImportedWorkbook,
+  packExportZip,
+  downloadBlob,
+  matchFolderName,
+  dateFolderName,
+  stamp,
+  loadDeps,
+} from "./exportBundle.js";
 
 const state = {
   tab: "schedule",
   dayFilter: "all",
-  historyDayFilter: "7",
   standingsExpandedTeam: null,
   standingsLeagueTab: null,
   standingsGroups: null,
@@ -63,6 +74,7 @@ const state = {
   sourceLabel: "内置数据",
   predictionCache: new Map(),
   predictionLoadingId: null,
+  exportBusy: false,
 };
 
 const els = {
@@ -79,8 +91,8 @@ const els = {
 
 const TAB_TITLES = {
   schedule: { title: "今日赛程", sub: "体彩竞彩足球 · 北京时间" },
-  history: { title: "历史赛况", sub: "体彩开盘对局 · 赛果开奖" },
   standings: { title: "联赛积分", sub: "官方排名 / 赛果统计" },
+  export: { title: "内容导出", sub: "竖屏战绩图 · 预测表 · 赛后核对" },
   predictions: { title: "预测分析", sub: "全网机构预测 · 仅供参考" },
 };
 
@@ -89,14 +101,6 @@ const DAY_FILTERS = [
   { id: "1", label: "1 天" },
   { id: "2", label: "2 天" },
   { id: "3", label: "3 天" },
-];
-
-const HISTORY_DAY_FILTERS = [
-  { id: "3", label: "3 天" },
-  { id: "7", label: "7 天" },
-  { id: "15", label: "15 天" },
-  { id: "30", label: "30 天" },
-  { id: "all", label: "全部" },
 ];
 
 init();
@@ -194,7 +198,7 @@ function bindEvents() {
   window.addEventListener("resize", () => {
     clearTimeout(marqueeResizeTimer);
     marqueeResizeTimer = setTimeout(() => {
-      if (state.tab === "schedule" || state.tab === "history") setupTeamNameMarquee(els.main);
+      if (state.tab === "schedule") setupTeamNameMarquee(els.main);
     }, 150);
   });
 }
@@ -215,8 +219,8 @@ function renderLoading() {
 function render() {
   updateTabs();
   if (state.tab === "schedule") renderSchedule();
-  else if (state.tab === "history") renderHistory();
   else if (state.tab === "standings") renderStandings();
+  else if (state.tab === "export") renderExport();
   else renderPredictions();
 }
 
@@ -300,45 +304,205 @@ function historyMatchCardHtml(m) {
     </article>`;
 }
 
-function renderHistory() {
-  const finished = getFinishedLotteryMatches(state.allMatches, state.history);
-  const filtered = filterPastDays(finished, state.historyDayFilter);
-  // 日期分组保持新→旧：先按日期 key 倒序
-  const groups = groupMatchesByDate(filtered).sort((a, b) => {
-    const ka = a.items[0]?.beijingDateKey || a.items[0]?.date || "";
-    const kb = b.items[0]?.beijingDateKey || b.items[0]?.date || "";
-    return String(kb).localeCompare(String(ka));
+function purchasableMatches() {
+  return sortMatchesByTime(state.matches.filter((m) => !m.finished));
+}
+
+function setExportStatus(text) {
+  const el = document.getElementById("export-status");
+  if (el) el.textContent = text || "";
+}
+
+function renderExport() {
+  const matches = purchasableMatches();
+  const groups = groupMatchesByDate(matches);
+  const daySummary = groups
+    .map((g) => `${g.label} ${g.items.length} 场`)
+    .join(" · ");
+
+  els.main.innerHTML = `
+    <div class="export-page">
+      <p class="export-intro">导出当前可购买场次的竖屏战绩图（近10场 + 共同对手）与预测 Excel；赛后导入同一张表，猜对的胜负/比分将标红。</p>
+      <div class="export-stat-card">
+        <div class="export-stat-value">${matches.length}</div>
+        <div class="export-stat-label">可购买场次</div>
+        <div class="export-stat-meta">${daySummary || "暂无在售场次"}</div>
+      </div>
+
+      <button class="action-btn export-btn" id="btn-export-bundle" type="button" ${state.exportBusy ? "disabled" : ""}>
+        ${state.exportBusy ? "导出进行中…" : "导出内容（图片 + Excel）"}
+      </button>
+      <button class="action-btn export-btn export-btn--secondary" id="btn-import-excel" type="button" ${state.exportBusy ? "disabled" : ""}>
+        导入 Excel 核对赛果
+      </button>
+      <input id="import-excel-input" type="file" accept=".xlsx,.xls" hidden />
+
+      <p class="export-status" id="export-status"></p>
+      <ul class="export-tips">
+        <li>图片为手机竖屏：每场一文件夹，含「近期10场」「共同对手」两张图</li>
+        <li>同一天多场会按日期分子文件夹打包 ZIP</li>
+        <li>Excel 含场次、联赛、对阵、简要分析、胜负/比分预测</li>
+        <li>赛后导入原表，系统对照完赛结果，猜对单元格标红并回写实际赛果</li>
+      </ul>
+      ${dataSourceNote()}
+    </div>
+  `;
+
+  document.getElementById("btn-export-bundle")?.addEventListener("click", () => {
+    runContentExport().catch((err) => {
+      console.error(err);
+      state.exportBusy = false;
+      renderExport();
+      showToast(err?.message || "导出失败");
+    });
   });
 
-  const html = [
-    `<div class="schedule-toolbar">
-      ${renderFilterBar(state.historyDayFilter, HISTORY_DAY_FILTERS)}
-      <p class="history-toolbar-note">中国体彩竞彩开盘场次 · 已完赛 ${filtered.length} 场</p>
-    </div>`,
-    filtered.length
-      ? groups
-          .map(
-            ({ label, items }) => `
-        <div class="section-label">${label}<span class="section-count">${items.length} 场</span></div>
-        ${items
-          .slice()
-          .sort((a, b) => {
-            const ta = a.utc ? new Date(a.utc).getTime() : 0;
-            const tb = b.utc ? new Date(b.utc).getTime() : 0;
-            return tb - ta;
-          })
-          .map((m) => historyMatchCardHtml(m))
-          .join("")}`
-          )
-          .join("")
-      : `<div class="empty-state"><div class="icon">📋</div><p>当前范围暂无体彩赛果</p><p class="detail-note">将展示竞彩开盘并对阵已完赛的场次</p></div>`,
-    dataSourceNote(),
-  ].join("");
+  const fileInput = document.getElementById("import-excel-input");
+  document.getElementById("btn-import-excel")?.addEventListener("click", () => fileInput?.click());
+  fileInput?.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = "";
+    if (!file) return;
+    runExcelImport(file).catch((err) => {
+      console.error(err);
+      state.exportBusy = false;
+      renderExport();
+      showToast(err?.message || "导入核对失败");
+    });
+  });
+}
 
-  els.main.innerHTML = html;
-  bindFilterBar(els.main, "historyDayFilter");
-  bindMatchCards(els.main);
-  scheduleTeamNameMarquee(els.main);
+async function collectMatchExportData(match, onProgress) {
+  onProgress?.("拉取近况与共同对手…");
+  const [form, injury] = await Promise.all([
+    loadPredictionForm(match),
+    fetchInjuryAnalysis(match).catch(() => null),
+  ]);
+  // 导出图展示更多共同对手
+  form.commonOpponents = buildCommonOpponentsAnalysis(
+    match.home,
+    match.away,
+    form.scoreHome || form.home || [],
+    form.scoreAway || form.away || [],
+    { limit: 20 }
+  );
+
+  // 批量导出优先用缓存机构观点；未缓存则用近况/伤停生成，避免逐场抓网页过慢
+  let analysis = state.predictionCache.get(match.id);
+  if (!analysis || analysis.schema !== ANALYSIS_SCHEMA) {
+    analysis = {
+      schema: ANALYSIS_SCHEMA,
+      sources: [],
+      consensus: { pick: null, bullets: [], goals: null },
+      injury,
+      stakes: null,
+    };
+  } else {
+    analysis = { ...analysis, injury: analysis.injury || injury };
+  }
+  analysis = { ...analysis, form };
+  const scoreOutlook = buildScoreOutlook(match, form, analysis.consensus?.goals);
+
+  onProgress?.("绘制竖屏图片…");
+  const [recentPng, commonPng] = await Promise.all([
+    renderRecentFormImage(match, form.home, form.away),
+    renderCommonOpponentsImage(match, form.commonOpponents),
+  ]);
+
+  return {
+    match,
+    form,
+    analysis,
+    scoreOutlook,
+    recentPng,
+    commonPng,
+    excelRow: {
+      num: match.num || String(match.id),
+      league: match.leagueShort || match.league || "",
+      matchup: `${match.home} VS ${match.away}`,
+      analysis: buildExcelBriefAnalysis(match, form, analysis),
+      outcome: buildExcelOutcomeLabel(analysis, scoreOutlook),
+      scores: buildExcelScoreLabel(scoreOutlook),
+    },
+  };
+}
+
+async function runContentExport() {
+  const matches = purchasableMatches();
+  if (!matches.length) {
+    showToast("当前没有可购买场次");
+    return;
+  }
+  if (state.exportBusy) return;
+  state.exportBusy = true;
+  renderExport();
+
+  try {
+    setExportStatus("准备依赖库…");
+    await loadDeps();
+
+    const excelRows = [];
+    const dayMap = new Map();
+
+    for (let i = 0; i < matches.length; i += 1) {
+      const match = matches[i];
+      const label = match.num || `${match.home} VS ${match.away}`;
+      setExportStatus(`处理 ${i + 1}/${matches.length}：${label}`);
+      const packed = await collectMatchExportData(match, (step) => {
+        setExportStatus(`处理 ${i + 1}/${matches.length}：${label} · ${step}`);
+      });
+      excelRows.push(packed.excelRow);
+
+      const dayKey = dateFolderName(match);
+      if (!dayMap.has(dayKey)) dayMap.set(dayKey, { name: dayKey, matches: [] });
+      dayMap.get(dayKey).matches.push({
+        folder: matchFolderName(match),
+        recentPng: packed.recentPng,
+        commonPng: packed.commonPng,
+      });
+    }
+
+    setExportStatus("生成 Excel…");
+    const excelBlob = await buildPredictionsWorkbook(excelRows);
+
+    setExportStatus("打包 ZIP…");
+    const dayFolders = [...dayMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+    await packExportZip({
+      dayFolders,
+      excelBlob,
+      zipName: `竞彩导出_${stamp()}.zip`,
+    });
+
+    setExportStatus(`已导出 ${matches.length} 场（含图片与预测表）`);
+    showToast("导出完成");
+  } finally {
+    state.exportBusy = false;
+    const status = document.getElementById("export-status")?.textContent || "";
+    renderExport();
+    setExportStatus(status);
+  }
+}
+
+async function runExcelImport(file) {
+  if (state.exportBusy) return;
+  state.exportBusy = true;
+  renderExport();
+  try {
+    setExportStatus("读取 Excel 并核对赛果…");
+    await loadDeps();
+    const finished = getFinishedLotteryMatches(state.allMatches, state.history);
+    const result = await gradeImportedWorkbook(file, finished);
+    downloadBlob(result.blob, `预测核对_${stamp()}.xlsx`);
+    setExportStatus(
+      `已核对 ${result.graded} 场：胜负命中 ${result.outcomeHits} · 比分命中 ${result.scoreHits}`
+    );
+    showToast("核对完成，已下载标红表");
+  } finally {
+    state.exportBusy = false;
+    const status = document.getElementById("export-status")?.textContent || "";
+    renderExport();
+    setExportStatus(status);
+  }
 }
 
 function groupMatchesByDate(matches) {
@@ -725,7 +889,7 @@ async function renderStandings() {
 function renderPredictions() {
   const matches = sortMatchesByTime(state.matches.filter((m) => !m.finished));
   els.main.innerHTML = [
-    `<p class="predictions-intro">打开场次后先给出市场倾向与赛果影响（晋级/保级等），再补充 Forebet / PredictZ 等机构摘要与伤停。</p>`,
+    `<p class="predictions-intro">打开场次后先给出赛果影响（晋级/保级等），再补充 Forebet / PredictZ 等机构摘要与伤停；无机构观点时不展示体彩隐含概率。</p>`,
     matches.length
       ? matches.map((m) => predictionCardHtml(m)).join("")
       : `<div class="empty-state"><div class="icon">🔮</div><p>当前暂无待预测场次</p></div>`,
@@ -739,11 +903,13 @@ function renderPredictions() {
 
 function predictionCardHtml(m) {
   const cached = state.predictionCache.get(m.id);
-  const pick = cached?.consensus?.pick || cached?.summary?.pick;
+  const agencySources = (cached?.sources || []).filter((s) => !s.local);
+  const pick = agencySources.length
+    ? cached?.consensus?.pick || cached?.summary?.pick
+    : null;
   const injuryNote = injuryBadgeText(cached?.injury);
-  const fromOdds = cached?.sources?.length && cached.sources.every((s) => s.local);
   const badge = pick
-    ? `<span class="prediction-badge prediction-badge--${outcomeClass(pick.key)}">${fromOdds ? "市场倾向" : "倾向"} ${pick.short}${pick.prob != null ? ` ${Math.round(pick.prob * 100)}%` : ""}</span>`
+    ? `<span class="prediction-badge prediction-badge--${outcomeClass(pick.key)}">倾向 ${pick.short}${pick.prob != null ? ` ${Math.round(pick.prob * 100)}%` : ""}</span>`
     : `<span class="prediction-badge prediction-badge--pending">查看分析</span>`;
   const injuryBadge = injuryNote
     ? `<span class="prediction-badge prediction-badge--injury">${injuryNote}</span>`
@@ -1004,7 +1170,7 @@ function buildExpectedGoals(match, form) {
   };
 }
 
-function buildTopScorePicks(lambdaHome, lambdaAway, maxGoals = 5) {
+function buildTopScorePicks(lambdaHome, lambdaAway, maxGoals = 5, topN = 2) {
   const grid = [];
   for (let h = 0; h <= maxGoals; h += 1) {
     for (let a = 0; a <= maxGoals; a += 1) {
@@ -1019,13 +1185,101 @@ function buildTopScorePicks(lambdaHome, lambdaAway, maxGoals = 5) {
   const mass = grid.reduce((s, x) => s + x.p, 0) || 1;
   for (const x of grid) x.p /= mass;
   grid.sort((a, b) => b.p - a.p || a.total - b.total);
-  return grid.slice(0, 2).map((x) => ({
+  return grid.slice(0, topN).map((x) => ({
     home: x.h,
     away: x.a,
     text: `${x.h}:${x.a}`,
     prob: x.p,
     total: x.total,
   }));
+}
+
+function outcomeProbsFromLambdas(lambdaHome, lambdaAway, maxGoals = 5) {
+  let home = 0;
+  let draw = 0;
+  let away = 0;
+  for (let h = 0; h <= maxGoals; h += 1) {
+    for (let a = 0; a <= maxGoals; a += 1) {
+      const p = poissonPmf(h, lambdaHome) * poissonPmf(a, lambdaAway);
+      if (h > a) home += p;
+      else if (h < a) away += p;
+      else draw += p;
+    }
+  }
+  const sum = home + draw + away || 1;
+  return { home: home / sum, draw: draw / sum, away: away / sum };
+}
+
+/** Excel「胜负预测」文案：机构倾向优先，否则按比分模型 */
+function buildExcelOutcomeLabel(analysis, scoreOutlook) {
+  const agency = (analysis?.sources || []).filter((s) => !s.local);
+  const pick = agency.length ? analysis?.consensus?.pick : null;
+  if (pick?.key === "home") return "主胜";
+  if (pick?.key === "away") return "负";
+  if (pick?.key === "draw") return "双平";
+
+  const probs =
+    scoreOutlook?.lambdaHome != null && scoreOutlook?.lambdaAway != null
+      ? outcomeProbsFromLambdas(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway)
+      : null;
+  if (!probs) return "—";
+
+  const ranked = [
+    { key: "home", label: "主胜", p: probs.home },
+    { key: "draw", label: "双平", p: probs.draw },
+    { key: "away", label: "负", p: probs.away },
+  ].sort((a, b) => b.p - a.p);
+
+  const [first, second] = ranked;
+  if (second && first.p - second.p < 0.08 && second.p >= 0.22) {
+    const dualMap = {
+      home: "主胜",
+      draw: "平",
+      away: "负",
+    };
+    return `${dualMap[first.key]}、${dualMap[second.key]}`;
+  }
+  return first.label;
+}
+
+function buildExcelScoreLabel(scoreOutlook) {
+  const top =
+    scoreOutlook?.lambdaHome != null && scoreOutlook?.lambdaAway != null
+      ? buildTopScorePicks(scoreOutlook.lambdaHome, scoreOutlook.lambdaAway, 5, 3)
+      : (scoreOutlook?.topScores || []).slice(0, 3);
+  if (!top.length) return "—";
+  return top.map((s) => `${s.home}-${s.away}`).join("、");
+}
+
+function buildExcelBriefAnalysis(match, form, analysis) {
+  const parts = [];
+  if (match.homeRank != null || match.awayRank != null) {
+    parts.push(
+      `主队${match.home}排名第${match.homeRank ?? "?"}，客队${match.away}排名第${match.awayRank ?? "?"}`
+    );
+  }
+  if (form?.home?.length) parts.push(`主队近10场${formStatText(form.home, match.home)}`);
+  if (form?.away?.length) parts.push(`客队近10场${formStatText(form.away, match.away)}`);
+
+  const inj = analysis?.injury;
+  if (inj?.home?.total) parts.push(`主队${inj.home.total}名主力伤停`);
+  if (inj?.away?.total) parts.push(`客队${inj.away.total}名主力伤停`);
+
+  const stakes = analysis?.stakes;
+  if (stakes?.isCup) parts.push("杯赛对阵，双方可能轮换");
+  else if (stakes?.bullets?.[1]) parts.push(stakes.bullets[1].replace(/^积分形势：/, ""));
+
+  if (form?.commonOpponents?.summary?.counted) {
+    parts.push(form.commonOpponents.summary.text);
+  }
+
+  const agency = (analysis?.sources || []).filter((s) => !s.local);
+  if (agency.length && analysis?.consensus?.bullets?.[0]) {
+    parts.push(analysis.consensus.bullets[0]);
+  }
+
+  if (!parts.length) return "情报样本不足，请结合临场信息判断。";
+  return `${parts.slice(0, 5).join("。")}。`;
 }
 
 function blendRate(formRate, webRate, formWeight = 0.6) {
@@ -1564,11 +1818,15 @@ async function openPredictionDetail(match) {
 }
 
 function predictionDetailHtml(match, analysis) {
+  const agencySources = (analysis.sources || []).filter((s) => !s.local);
   const consensus = analysis.consensus || analysis.summary || {};
-  const pick = consensus.pick;
+  // 仅在有真实机构源时展示综合倾向；不用体彩隐含概率顶替
+  const pick = agencySources.length ? consensus.pick : null;
   const scoreOutlook = buildScoreOutlook(match, analysis.form, consensus.goals);
-  const onlyOdds = (analysis.sources || []).length > 0 && (analysis.sources || []).every((s) => s.local);
-  const verdictLabel = onlyOdds ? "市场赔率倾向" : "综合倾向";
+  const webPending = !!analysis.webPending;
+  const emptyNote = webPending
+    ? "机构观点加载中…"
+    : "暂无机构观点摘要。";
 
   return `
     <div class="detail-card prediction-summary-card">
@@ -1577,7 +1835,7 @@ function predictionDetailHtml(match, analysis) {
       ${
         pick
           ? `<div class="prediction-verdict">
-              <div class="prediction-verdict-label">${verdictLabel}</div>
+              <div class="prediction-verdict-label">综合倾向</div>
               <div class="prediction-verdict-value prediction-verdict-value--${outcomeClass(pick.key)}">${pick.label}</div>
               <div class="prediction-verdict-meta">${consensus.tagline || consensus.confidence || "全网聚合"}</div>
             </div>
@@ -1587,7 +1845,7 @@ function predictionDetailHtml(match, analysis) {
                 ? `<ul class="prediction-bullets">${consensus.bullets.map((b) => `<li>${b}</li>`).join("")}</ul>`
                 : ""
             }`
-          : `<p class="prediction-empty-note">未形成明确倾向，请查看下方赛果影响与各家摘要。</p>`
+          : `<p class="prediction-empty-note">${emptyNote}</p>`
       }
     </div>
 
@@ -1600,11 +1858,11 @@ function predictionDetailHtml(match, analysis) {
     ${commonOpponentsCardHtml(match, analysis.form)}
 
     <div class="prediction-section-title">各家观点摘要</div>
-    ${webSourcesHtml(analysis.sources || [])}
+    ${webSourcesHtml(analysis.sources || [], { pending: webPending })}
 
     ${injuryReportHtml(analysis.injury, match, { pending: !!analysis.injuryPending })}
 
-    <p class="predictions-disclaimer">倾向综合市场赔率与公开机构摘要；精确比分由主客近况与共同对手泊松推算，大小球期望另按近况进球结构估算（互不改写）；赛果影响为启发式，仅供参考，不构成投注建议。</p>
+    <p class="predictions-disclaimer">综合倾向仅来自公开机构摘要；精确比分由主客近况与共同对手泊松推算，大小球期望另按近况进球结构估算（互不改写）；赛果影响为启发式，仅供参考，不构成投注建议。</p>
   `;
 }
 

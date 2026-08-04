@@ -2794,3 +2794,107 @@ html, body {
   color: var(--primary);
   text-decoration: none;
 }
+
+/* —— 内容导出 —— */
+.export-page {
+  padding: 4px 0 24px;
+}
+
+.export-intro {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  margin-bottom: 14px;
+}
+
+.export-stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px 16px;
+  text-align: center;
+  margin-bottom: 14px;
+}
+
+.export-stat-value {
+  font-size: 36px;
+  font-weight: 700;
+  color: var(--primary);
+  line-height: 1.1;
+}
+
+.export-stat-label {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.export-stat-meta {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.export-btn {
+  margin-bottom: 10px;
+}
+
+.export-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.export-btn--secondary {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.export-btn--secondary:active {
+  background: var(--bg);
+}
+
+.export-status {
+  min-height: 20px;
+  margin: 8px 0 12px;
+  font-size: 12px;
+  color: var(--primary);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.export-tips {
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.export-tips li {
+  position: relative;
+  padding-left: 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 6px;
+}
+
+.export-tips li:last-child {
+  margin-bottom: 0;
+}
+
+.export-tips li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
+}
