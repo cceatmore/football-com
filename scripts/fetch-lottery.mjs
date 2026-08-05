@@ -393,10 +393,11 @@ async function main() {
   const startDate = new Date(businessDate);
   startDate.setDate(startDate.getDate() - 30);
   const begin = startDate.toISOString().slice(0, 10);
-  const seedMatches = [...(existing.history || []), ...matches];
+  const retained = [...(existing.history || []), ...(existing.matches || [])];
+  const seedMatches = [...retained, ...matches];
   const results = await fetchResults(begin, businessDate, seedMatches);
 
-  const history = mergeHistory(existing.history || [], results, matches);
+  const history = mergeHistory(retained, results, matches);
 
   const out = {
     name: "体彩竞彩足球",

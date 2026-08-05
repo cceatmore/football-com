@@ -467,9 +467,9 @@ function canvasToPngBlob(canvas) {
   });
 }
 
-const EXCEL_HEADERS = ["场次编号", "联赛信息", "对战队伍", "简要分析", "胜负预测", "半全场", "比分预测"];
+const EXCEL_HEADERS = ["场次编号", "联赛信息", "对战队伍", "简要分析", "胜负预测", "半全场", "比分预测", "场次ID"];
 const EXCEL_AVATAR_URL = new URL("../assets/excel-avatar.png", import.meta.url).href;
-const EXCEL_COL_COUNT = 7;
+const EXCEL_COL_COUNT = 8;
 const EXCEL_BORDER = {
   top: { style: "thin", color: { argb: "FF000000" } },
   left: { style: "thin", color: { argb: "FF000000" } },
@@ -555,8 +555,8 @@ export async function buildPredictionsWorkbook(rows) {
     views: [{ state: "frozen", ySplit: 2 }],
   });
 
-  // 简要分析列适当放宽，阅读更舒服
-  const widths = [11, 10, 20, 72, 11, 12, 16];
+  // 简要分析列适当放宽；场次ID 列收窄供核对匹配
+  const widths = [11, 10, 20, 72, 11, 12, 16, 10];
   // 垂直靠上，避免行高略大时上下对称留白显眼
   const centerMid = {
     horizontal: "center",
@@ -570,7 +570,7 @@ export async function buildPredictionsWorkbook(rows) {
     wrapText: true,
     shrinkToFit: false,
   };
-  const colKeys = ["num", "league", "matchup", "analysis", "outcome", "half", "scores"];
+  const colKeys = ["num", "league", "matchup", "analysis", "outcome", "half", "scores", "matchId"];
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w;
     ws.getColumn(i + 1).key = colKeys[i];
@@ -620,6 +620,7 @@ export async function buildPredictionsWorkbook(rows) {
       row.outcome,
       row.half,
       row.scores,
+      row.matchId || "",
     ]);
     r.height = fitRowHeight({ ...row, analysis }, widths);
     r.eachCell((cell, colNumber) => {
@@ -830,7 +831,13 @@ function matchTeams(finished, teams) {
   return teamNamesLooselyEqual(mh, homeKey) && teamNamesLooselyEqual(ma, awayKey);
 }
 
-function findFinishedMatch(finishedMatches, { num, matchup }) {
+function findFinishedMatch(finishedMatches, { num, matchup, matchId }) {
+  const idKey = String(matchId || "").trim();
+  if (idKey) {
+    const byId = finishedMatches.find((m) => String(m.id) === idKey);
+    if (byId) return byId;
+  }
+
   const numKey = String(num || "").trim();
   const teams = parseMatchupTeams(matchup);
 
@@ -865,9 +872,10 @@ function resolveImportColumns(headerRow) {
     outcome: 5,
     half: 6,
     scores: 7,
-    actualOutcome: 8,
-    actualScore: 9,
-    actualHalf: 10,
+    matchId: 0,
+    actualOutcome: 9,
+    actualScore: 10,
+    actualHalf: 11,
   };
   headerRow.eachCell((cell, col) => {
     const t = cellText(cell).replace(/\s+/g, "");
@@ -875,7 +883,8 @@ function resolveImportColumns(headerRow) {
     if (/实际半全场|实际半场/.test(t)) map.actualHalf = col;
     else if (/实际赛果/.test(t)) map.actualOutcome = col;
     else if (/实际比分/.test(t)) map.actualScore = col;
-    else if (/场次/.test(t)) map.num = col;
+    else if (/场次ID|比赛ID|matchId/i.test(t)) map.matchId = col;
+    else if (/场次编号|^场次$/.test(t)) map.num = col;
     else if (/联赛/.test(t)) map.league = col;
     else if (/对战|对阵|队伍/.test(t)) map.matchup = col;
     else if (/简要分析/.test(t) || (/分析/.test(t) && !/每日分析/.test(t))) map.analysis = col;
@@ -883,13 +892,17 @@ function resolveImportColumns(headerRow) {
     else if (/半全场|半场预测/.test(t)) map.half = col;
     else if (/比分预测/.test(t)) map.scores = col;
   });
-  // 旧表无半场列时：比分在第 6 列
-  if (!cellText(headerRow.getCell(map.half)).includes("半场") && /比分/.test(cellText(headerRow.getCell(6)))) {
+  // 旧表无半场列时：比分在第 6 列（且尚未识别出「实际*」表头）
+  const halfText = map.half ? cellText(headerRow.getCell(map.half)) : "";
+  const hasActualHeader = /实际/.test(cellText(headerRow.getCell(map.actualOutcome)));
+  if (!halfText.includes("半场") && /比分/.test(cellText(headerRow.getCell(6)))) {
     map.half = 0;
     map.scores = 6;
-    map.actualOutcome = 7;
-    map.actualScore = 8;
-    map.actualHalf = 9;
+    if (!hasActualHeader) {
+      map.actualOutcome = 7;
+      map.actualScore = 8;
+      map.actualHalf = 9;
+    }
   }
   return map;
 }
@@ -958,7 +971,8 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
 
     const num = cellText(row.getCell(cols.num)).trim();
     const matchup = cellText(row.getCell(cols.matchup)).trim();
-    if (!num && !matchup) return;
+    const matchId = cols.matchId ? cellText(row.getCell(cols.matchId)).trim() : "";
+    if (!num && !matchup && !matchId) return;
     // 跳过误扫到的标题行
     if (/每日分析|娱乐参考/.test(`${num}${matchup}`)) return;
 
@@ -975,7 +989,7 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
     clearMarkStyle(scoreCell);
     if (halfCell) clearMarkStyle(halfCell);
 
-    const match = findFinishedMatch(finishedMatches, { num, matchup });
+    const match = findFinishedMatch(finishedMatches, { num, matchup, matchId });
     if (!match) {
       unmatched += 1;
       row.getCell(cols.actualOutcome).value = "未完赛/未匹配";

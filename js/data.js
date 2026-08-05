@@ -564,13 +564,16 @@ export async function fetchLatestLotteryData() {
     upstream?.businessDate || fallback?.businessDate || beijingDateKey(new Date());
   const results = await fetchRecentResults(businessDate, { seedMatches });
 
+  // 开售列表会随停售消失：把上一份 matches 并入 history，避免场次 ID/对阵丢失后无法核对
+  const retained = [...(fallback?.history || []), ...(fallback?.matches || [])];
+
   if (upstream) {
     const raw = {
       name: "体彩竞彩足球",
       updatedAt: beijingNowIso(),
       businessDate: upstream.businessDate || fallback?.businessDate || "",
       matches: upstream.matches,
-      history: mergeHistory(fallback?.history || [], results, upstream.matches),
+      history: mergeHistory(retained, results, upstream.matches),
     };
     return packRaw(raw, "live", "体彩实时");
   }
@@ -582,7 +585,7 @@ export async function fetchLatestLotteryData() {
       updatedAt: beijingNowIso(),
       businessDate: fallback.businessDate || "",
       matches: fallback.matches,
-      history: mergeHistory(fallback.history || [], results, fallback.matches),
+      history: mergeHistory(retained, results, fallback.matches),
     };
     return packRaw(raw, fallback.source || "local", `${fallback.sourceLabel || "缓存"}·赛果已补`);
   }

@@ -447,6 +447,7 @@ async function collectMatchExportData(match, onProgress) {
       outcome: buildExcelOutcomeLabel(analysis, scoreOutlook, match),
       half: buildExcelHalfFullLabel(match, form, scoreOutlook),
       scores: buildExcelScoreLabel(scoreOutlook),
+      matchId: match.id != null ? String(match.id) : "",
     },
   };
 }
