@@ -8,6 +8,8 @@ const UPSTREAM_URL =
 const RESULT_URL = (begin, end, page = 1) =>
   `https://webapi.sporttery.cn/gateway/jc/football/getMatchResultV1.qry?matchPage=${page}&pcOrWap=1&leagueId=&matchBeginDate=${begin}&matchEndDate=${end}`;
 
+const UNIFORM_BASE = "https://webapi.sporttery.cn/gateway/uniform/football";
+
 const FETCH_HEADERS = {
   Referer: "https://m.sporttery.cn/mjc/jsq/zqspf/",
   Accept: "application/json, text/plain, */*",
@@ -19,8 +21,16 @@ const RESULT_HEADERS = {
   Accept: "application/json, text/plain, */*",
 };
 
+const UNIFORM_HEADERS = {
+  Referer: "https://m.sporttery.cn/zqlszl/bssj/index.html",
+  Accept: "application/json, text/plain, */*",
+};
+
 const FETCH_TIMEOUT_MS = 8000;
 const DAILY_UPDATE_HOUR = 11; // 北京时间 11:00
+/** 体彩竞彩 sportteryMatchId 常见号段，用于从球队战绩里筛开奖场次 */
+const LOTTERY_MATCH_ID_MIN = 2000000;
+const LOTTERY_MATCH_ID_MAX = 2100000;
 
 let bundledCache = null;
 
@@ -116,40 +126,177 @@ function normalizeSelling(raw) {
   };
 }
 
+function parseScorePair(value) {
+  if (value == null || value === "") return [null, null];
+  if (Array.isArray(value) && value.length >= 2) {
+    const home = parseInt(value[0], 10);
+    const away = parseInt(value[1], 10);
+    if (Number.isNaN(home) || Number.isNaN(away)) return [null, null];
+    return [home, away];
+  }
+  const m = String(value)
+    .trim()
+    .match(/(\d+)\s*[:：\-]\s*(\d+)/);
+  if (!m) return [null, null];
+  return [parseInt(m[1], 10), parseInt(m[2], 10)];
+}
+
+function extractScores(raw = {}) {
+  let homeScore = null;
+  let awayScore = null;
+  let homeHtScore = null;
+  let awayHtScore = null;
+
+  // 优先完整比分字符串（fullCourtGoal / "1:2"）
+  [homeScore, awayScore] = parseScorePair(raw.fullCourtGoal);
+  if (homeScore == null) [homeScore, awayScore] = parseScorePair(raw.fullHomeScore);
+  if (homeScore == null && raw.homeScore != null && raw.awayScore != null) {
+    const hs = parseInt(raw.homeScore, 10);
+    const as = parseInt(raw.awayScore, 10);
+    if (!Number.isNaN(hs) && !Number.isNaN(as)) {
+      homeScore = hs;
+      awayScore = as;
+    }
+  }
+
+  [homeHtScore, awayHtScore] = parseScorePair(raw.halfTimeGoal ?? raw.htScore);
+  if (homeHtScore == null && raw.homeHtScore != null && raw.awayHtScore != null) {
+    const hs = parseInt(raw.homeHtScore, 10);
+    const as = parseInt(raw.awayHtScore, 10);
+    if (!Number.isNaN(hs) && !Number.isNaN(as)) {
+      homeHtScore = hs;
+      awayHtScore = as;
+    }
+  }
+
+  const sections = raw.sectionsScore || raw.sectionScore;
+  if (Array.isArray(sections)) {
+    if (homeHtScore == null && sections.length >= 2) {
+      [homeHtScore, awayHtScore] = parseScorePair(sections.slice(0, 2));
+    }
+    if (homeScore == null && sections.length >= 4) {
+      [homeScore, awayScore] = parseScorePair(sections.slice(2, 4));
+    }
+  } else if (typeof sections === "string") {
+    const parts = sections.split(/[;/|]/);
+    if (homeHtScore == null && parts[0]) [homeHtScore, awayHtScore] = parseScorePair(parts[0]);
+    if (homeScore == null && parts[1]) [homeScore, awayScore] = parseScorePair(parts[1]);
+  }
+
+  return { homeScore, awayScore, homeHtScore, awayHtScore };
+}
+
+function preferText(...values) {
+  for (const v of values) {
+    const s = String(v || "").trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+function mergeMatchRecord(base = {}, extra = {}) {
+  const finished = Boolean(extra.finished || base.finished);
+  const homeScore = extra.homeScore ?? base.homeScore ?? null;
+  const awayScore = extra.awayScore ?? base.awayScore ?? null;
+  return {
+    ...base,
+    ...extra,
+    num: preferText(extra.num, base.num),
+    matchNum: extra.matchNum ?? base.matchNum ?? null,
+    home: preferText(base.home, extra.home),
+    away: preferText(base.away, extra.away),
+    league: preferText(base.league, extra.league),
+    leagueShort: preferText(base.leagueShort, extra.leagueShort),
+    homeScore,
+    awayScore,
+    homeHtScore: extra.homeHtScore ?? base.homeHtScore ?? null,
+    awayHtScore: extra.awayHtScore ?? base.awayHtScore ?? null,
+    finished: finished || (homeScore != null && awayScore != null),
+    odds: extra.odds ?? base.odds ?? null,
+    hhad: extra.hhad ?? base.hhad ?? null,
+    single: Boolean(extra.single || base.single),
+  };
+}
+
 function normalizeResult(raw) {
-  const hs = parseInt(raw.homeScore ?? raw.fullHomeScore, 10);
-  const as = parseInt(raw.awayScore ?? raw.fullAwayScore, 10);
-  const finished = !Number.isNaN(hs) && !Number.isNaN(as);
+  const scores = extractScores(raw);
+  const finished = scores.homeScore != null && scores.awayScore != null;
   const timeInfo = parseMatchTime(raw.matchDate, raw.matchTime || "00:00:00");
+  const id = raw.matchId ?? raw.sportteryMatchId;
 
   return {
-    id: raw.matchId,
+    id,
     num: raw.matchNumStr || "",
     matchNum: raw.matchNum,
-    round: raw.leagueNameAbbr || raw.leagueName || "",
-    league: raw.leagueName || raw.leagueNameAbbr || "",
-    leagueShort: raw.leagueNameAbbr || "",
-    leagueId: raw.leagueId,
+    round: raw.leagueNameAbbr || raw.leagueName || raw.tournamentShortName || "",
+    league: raw.leagueName || raw.leagueNameAbbr || raw.tournamentShortName || "",
+    leagueShort: raw.leagueNameAbbr || raw.tournamentShortName || "",
+    leagueId: raw.leagueId || raw.sportteryTournamentId || raw.tournamentId,
     leagueColor: "",
     date: raw.matchDate,
     time: raw.matchTime || "",
     businessDate: raw.businessDate || raw.matchDate,
-    home: raw.homeTeam || raw.homeTeamAbbName || raw.homeTeamAllName,
-    away: raw.awayTeam || raw.awayTeamAbbName || raw.awayTeamAllName,
+    home: raw.homeTeam || raw.homeTeamAbbName || raw.homeTeamAllName || raw.homeTeamShortName,
+    away: raw.awayTeam || raw.awayTeamAbbName || raw.awayTeamAllName || raw.awayTeamShortName,
     homeRank: null,
     awayRank: null,
-    rankLeague: raw.leagueNameAbbr || "",
-    homeScore: finished ? hs : null,
-    awayScore: finished ? as : null,
-    homeHtScore: null,
-    awayHtScore: null,
+    rankLeague: raw.leagueNameAbbr || raw.tournamentShortName || "",
+    homeScore: finished ? scores.homeScore : null,
+    awayScore: finished ? scores.awayScore : null,
+    homeHtScore: scores.homeHtScore,
+    awayHtScore: scores.awayHtScore,
     finished,
     odds: null,
     hhad: null,
     single: false,
     status: "Finished",
-    group: raw.leagueNameAbbr || raw.leagueName || "其他",
-    groupLabel: raw.leagueName || "",
+    group: raw.leagueNameAbbr || raw.leagueName || raw.tournamentShortName || "其他",
+    groupLabel: raw.leagueName || raw.tournamentShortName || "",
+    stage: "league",
+    ground: "",
+    utc: timeInfo.utc,
+    beijingTime: timeInfo.beijing,
+    beijingDate: timeInfo.beijingDate,
+    beijingDateKey: timeInfo.beijingDateKey || raw.matchDate,
+    beijingFull: timeInfo.beijingFull,
+  };
+}
+
+function normalizeUniformResult(raw) {
+  const sid = Number(raw.sportteryMatchId) || 0;
+  if (sid < LOTTERY_MATCH_ID_MIN || sid >= LOTTERY_MATCH_ID_MAX) return null;
+  const scores = extractScores(raw);
+  if (scores.homeScore == null || scores.awayScore == null) return null;
+  const timeInfo = parseMatchTime(raw.matchDate, raw.matchTime || "00:00:00");
+  const league = raw.tournamentShortName || "";
+  return {
+    id: sid,
+    num: raw.matchNumStr || "",
+    matchNum: raw.matchNum ?? null,
+    round: league,
+    league,
+    leagueShort: league,
+    leagueId: raw.sportteryTournamentId || raw.tournamentId || null,
+    leagueColor: "",
+    date: raw.matchDate,
+    time: typeof raw.matchTime === "string" ? raw.matchTime : "",
+    businessDate: raw.matchDate,
+    home: raw.homeTeamShortName || raw.homeTeamAllName || raw.homeTeamAbbName,
+    away: raw.awayTeamShortName || raw.awayTeamAllName || raw.awayTeamAbbName,
+    homeRank: null,
+    awayRank: null,
+    rankLeague: league,
+    homeScore: scores.homeScore,
+    awayScore: scores.awayScore,
+    homeHtScore: scores.homeHtScore,
+    awayHtScore: scores.awayHtScore,
+    finished: true,
+    odds: null,
+    hhad: null,
+    single: false,
+    status: "Finished",
+    group: league || "其他",
+    groupLabel: league,
     stage: "league",
     ground: "",
     utc: timeInfo.utc,
@@ -170,15 +317,17 @@ function mergeHistory(existing = [], results = [], current = []) {
     if (m?.id != null) map.set(m.id, m);
   }
   for (const m of results) {
-    if (m?.id != null) map.set(m.id, m);
+    if (m?.id == null) continue;
+    const prev = map.get(m.id);
+    map.set(m.id, prev ? mergeMatchRecord(prev, m) : m);
   }
   for (const m of current) {
     if (m?.id == null) continue;
     const prev = map.get(m.id);
     if (prev?.finished) {
-      map.set(m.id, { ...m, ...prev, odds: m.odds ?? prev.odds, hhad: m.hhad ?? prev.hhad });
+      map.set(m.id, mergeMatchRecord(m, prev));
     } else {
-      map.set(m.id, prev ? { ...prev, ...m } : m);
+      map.set(m.id, prev ? mergeMatchRecord(prev, m) : m);
     }
   }
   return sortMatchesByTime([...map.values()]);
@@ -260,8 +409,8 @@ function shiftBeijingDate(dateKey, deltaDays) {
   return utc.toISOString().slice(0, 10);
 }
 
-/** 拉取体彩竞彩开奖赛果（默认近 30 天，多页） */
-async function fetchRecentResults(businessDate, { days = 30, maxPages = 6 } = {}) {
+/** 官方开奖列表（部分网络环境会被 WAF 403） */
+async function fetchRecentResultsFromJc(businessDate, { days = 30, maxPages = 6 } = {}) {
   const end = businessDate || beijingDateKey(new Date());
   const begin = shiftBeijingDate(end, -Math.max(1, days));
   const all = [];
@@ -269,19 +418,78 @@ async function fetchRecentResults(businessDate, { days = 30, maxPages = 6 } = {}
 
   for (let page = 1; page <= maxPages; page += 1) {
     const data = await fetchJson(RESULT_URL(begin, end, page), FETCH_TIMEOUT_MS, RESULT_HEADERS);
+    if (!data) break;
     const list = data?.success ? data.value?.matchResultList || [] : [];
     if (!list.length) break;
     for (const raw of list) {
       const m = normalizeResult(raw);
-      if (m?.id == null || seen.has(m.id)) continue;
+      if (m?.id == null || !m.finished || seen.has(m.id)) continue;
       seen.add(m.id);
       all.push(m);
     }
-    // 单页不足常见页量时认为已到末页
     if (list.length < 30) break;
   }
 
   return all;
+}
+
+function pickResultSeedIds(seedMatches = [], limit = 12) {
+  const ids = [];
+  const seen = new Set();
+  const sorted = [...seedMatches].sort((a, b) => {
+    const da = String(a?.beijingDateKey || a?.date || "");
+    const db = String(b?.beijingDateKey || b?.date || "");
+    return db.localeCompare(da);
+  });
+  for (const m of sorted) {
+    const id = Number(m?.id);
+    if (!Number.isFinite(id) || id < LOTTERY_MATCH_ID_MIN || id >= LOTTERY_MATCH_ID_MAX) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= limit) break;
+  }
+  return ids;
+}
+
+/** 开奖列表不可用时：从球队战绩接口收集近期待开奖/已完赛竞彩场次 */
+async function fetchRecentResultsFromUniform(seedMatches = [], { days = 30 } = {}) {
+  const seedIds = pickResultSeedIds(seedMatches, 12);
+  if (!seedIds.length) return [];
+
+  const begin = shiftBeijingDate(beijingDateKey(new Date()), -Math.max(1, days));
+  const map = new Map();
+
+  await Promise.all(
+    seedIds.map(async (id) => {
+      const data = await fetchJson(
+        `${UNIFORM_BASE}/getMatchResultV1.qry?sportteryMatchId=${id}&termLimits=20`,
+        FETCH_TIMEOUT_MS,
+        UNIFORM_HEADERS
+      );
+      const lists = [
+        ...(data?.success ? data.value?.home?.matchList || [] : []),
+        ...(data?.success ? data.value?.away?.matchList || [] : []),
+      ];
+      for (const raw of lists) {
+        const m = normalizeUniformResult(raw);
+        if (!m?.id || !m.finished) continue;
+        const dateKey = m.beijingDateKey || m.date || "";
+        if (dateKey && dateKey < begin) continue;
+        const prev = map.get(m.id);
+        map.set(m.id, prev ? mergeMatchRecord(prev, m) : m);
+      }
+    })
+  );
+
+  return [...map.values()];
+}
+
+/** 拉取体彩竞彩开奖赛果：优先官方列表，失败则用战绩接口兜底 */
+async function fetchRecentResults(businessDate, { days = 30, maxPages = 6, seedMatches = [] } = {}) {
+  const fromJc = await fetchRecentResultsFromJc(businessDate, { days, maxPages });
+  if (fromJc.length) return fromJc;
+  return fetchRecentResultsFromUniform(seedMatches, { days });
 }
 
 /** 导出：已完场的体彩开盘对局（时间新→旧） */
@@ -340,15 +548,23 @@ async function loadFallbackData() {
   return fallback;
 }
 
-/** 优先拉取体彩实时数据，失败时回退到同站/内置缓存 */
+/** 优先拉取体彩实时数据，失败时回退到同站/内置缓存（仍会尝试补拉赛果） */
 export async function fetchLatestLotteryData() {
   const [upstream, fallback] = await Promise.all([
     fetchUpstreamMatches(),
     loadFallbackData(),
   ]);
 
+  const seedMatches = [
+    ...(fallback?.history || []),
+    ...(fallback?.matches || []),
+    ...(upstream?.matches || []),
+  ];
+  const businessDate =
+    upstream?.businessDate || fallback?.businessDate || beijingDateKey(new Date());
+  const results = await fetchRecentResults(businessDate, { seedMatches });
+
   if (upstream) {
-    const results = await fetchRecentResults(upstream.businessDate);
     const raw = {
       name: "体彩竞彩足球",
       updatedAt: beijingNowIso(),
@@ -359,7 +575,18 @@ export async function fetchLatestLotteryData() {
     return packRaw(raw, "live", "体彩实时");
   }
 
-  if (fallback) return fallback;
+  if (fallback) {
+    if (!results.length) return fallback;
+    const raw = {
+      name: fallback.name || "体彩竞彩足球",
+      updatedAt: beijingNowIso(),
+      businessDate: fallback.businessDate || "",
+      matches: fallback.matches,
+      history: mergeHistory(fallback.history || [], results, fallback.matches),
+    };
+    return packRaw(raw, fallback.source || "local", `${fallback.sourceLabel || "缓存"}·赛果已补`);
+  }
+
   throw new Error("无法加载赛事数据");
 }
 

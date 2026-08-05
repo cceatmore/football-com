@@ -512,9 +512,23 @@ async function runExcelImport(file) {
   state.exportBusy = true;
   renderExport();
   try {
-    setExportStatus("读取 Excel 并核对赛果…");
+    setExportStatus("补拉近期赛果…");
     await loadDeps();
-    const finished = getFinishedLotteryMatches(state.allMatches, state.history);
+    try {
+      const data = await fetchLatestLotteryData();
+      applyFetchedData(data);
+    } catch {
+      /* 沿用内存数据 */
+    }
+
+    let finished = getFinishedLotteryMatches(state.allMatches, state.history);
+    if (!finished.length) {
+      setExportStatus("当前没有已完赛数据，无法核对。请检查网络后点「立即检索」再试");
+      showToast("无完赛数据，未能核对");
+      return;
+    }
+
+    setExportStatus(`读取 Excel 并核对赛果（已完赛 ${finished.length} 场）…`);
     const result = await gradeImportedWorkbook(file, finished);
     downloadBlob(result.blob, `预测核对_${stamp()}.xlsx`);
     setExportStatus(
@@ -522,7 +536,7 @@ async function runExcelImport(file) {
         result.pending ? ` · 未完赛/未匹配 ${result.pending}` : ""
       }`
     );
-    showToast("核对完成，已下载标红表");
+    showToast(result.graded ? "核对完成，已下载标红表" : "未匹配到完赛场次，请确认表内场次编号/对阵");
   } finally {
     state.exportBusy = false;
     const status = document.getElementById("export-status")?.textContent || "";

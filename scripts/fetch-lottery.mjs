@@ -100,38 +100,155 @@ function normalizeSelling(raw) {
   };
 }
 
+function parseScorePair(value) {
+  if (value == null || value === "") return [null, null];
+  if (Array.isArray(value) && value.length >= 2) {
+    const home = parseInt(value[0], 10);
+    const away = parseInt(value[1], 10);
+    if (Number.isNaN(home) || Number.isNaN(away)) return [null, null];
+    return [home, away];
+  }
+  const m = String(value)
+    .trim()
+    .match(/(\d+)\s*[:：\-]\s*(\d+)/);
+  if (!m) return [null, null];
+  return [parseInt(m[1], 10), parseInt(m[2], 10)];
+}
+
+function extractScores(raw = {}) {
+  let homeScore = null;
+  let awayScore = null;
+  let homeHtScore = null;
+  let awayHtScore = null;
+
+  [homeScore, awayScore] = parseScorePair(raw.fullCourtGoal);
+  if (homeScore == null && raw.homeScore != null && raw.awayScore != null) {
+    const hs = parseInt(raw.homeScore, 10);
+    const as = parseInt(raw.awayScore, 10);
+    if (!Number.isNaN(hs) && !Number.isNaN(as)) {
+      homeScore = hs;
+      awayScore = as;
+    }
+  }
+
+  [homeHtScore, awayHtScore] = parseScorePair(raw.halfTimeGoal);
+  const sections = raw.sectionsScore || raw.sectionScore;
+  if (Array.isArray(sections)) {
+    if (homeHtScore == null && sections.length >= 2) {
+      [homeHtScore, awayHtScore] = parseScorePair(sections.slice(0, 2));
+    }
+    if (homeScore == null && sections.length >= 4) {
+      [homeScore, awayScore] = parseScorePair(sections.slice(2, 4));
+    }
+  }
+
+  return { homeScore, awayScore, homeHtScore, awayHtScore };
+}
+
+function preferText(...values) {
+  for (const v of values) {
+    const s = String(v || "").trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+function mergeMatchRecord(base = {}, extra = {}) {
+  const homeScore = extra.homeScore ?? base.homeScore ?? null;
+  const awayScore = extra.awayScore ?? base.awayScore ?? null;
+  return {
+    ...base,
+    ...extra,
+    num: preferText(extra.num, base.num),
+    matchNum: extra.matchNum ?? base.matchNum ?? null,
+    home: preferText(base.home, extra.home),
+    away: preferText(base.away, extra.away),
+    league: preferText(base.league, extra.league),
+    leagueShort: preferText(base.leagueShort, extra.leagueShort),
+    homeScore,
+    awayScore,
+    homeHtScore: extra.homeHtScore ?? base.homeHtScore ?? null,
+    awayHtScore: extra.awayHtScore ?? base.awayHtScore ?? null,
+    finished: Boolean(extra.finished || base.finished || (homeScore != null && awayScore != null)),
+    odds: extra.odds ?? base.odds ?? null,
+    hhad: extra.hhad ?? base.hhad ?? null,
+    single: Boolean(extra.single || base.single),
+  };
+}
+
 function normalizeResult(raw) {
-  const hs = parseInt(raw.homeScore ?? raw.fullHomeScore ?? raw.sectionsScore?.[0], 10);
-  const as = parseInt(raw.awayScore ?? raw.fullAwayScore ?? raw.sectionsScore?.[1], 10);
-  const finished = !Number.isNaN(hs) && !Number.isNaN(as);
+  const scores = extractScores(raw);
+  const finished = scores.homeScore != null && scores.awayScore != null;
   const timeInfo = beijingParts(raw.matchDate, raw.matchTime || "00:00:00");
 
   return {
-    id: raw.matchId,
+    id: raw.matchId ?? raw.sportteryMatchId,
     num: raw.matchNumStr || "",
     matchNum: raw.matchNum,
-    round: raw.leagueNameAbbr || raw.leagueName || "",
-    league: raw.leagueName || raw.leagueNameAbbr || "",
-    leagueShort: raw.leagueNameAbbr || "",
-    leagueId: raw.leagueId,
+    round: raw.leagueNameAbbr || raw.leagueName || raw.tournamentShortName || "",
+    league: raw.leagueName || raw.leagueNameAbbr || raw.tournamentShortName || "",
+    leagueShort: raw.leagueNameAbbr || raw.tournamentShortName || "",
+    leagueId: raw.leagueId || raw.sportteryTournamentId,
     date: raw.matchDate,
     time: raw.matchTime || "",
     businessDate: raw.businessDate || raw.matchDate,
-    home: raw.homeTeam || raw.homeTeamAbbName || raw.homeTeamAllName,
-    away: raw.awayTeam || raw.awayTeamAbbName || raw.awayTeamAllName,
+    home: raw.homeTeam || raw.homeTeamAbbName || raw.homeTeamAllName || raw.homeTeamShortName,
+    away: raw.awayTeam || raw.awayTeamAbbName || raw.awayTeamAllName || raw.awayTeamShortName,
     homeRank: null,
     awayRank: null,
-    rankLeague: raw.leagueNameAbbr || "",
-    homeScore: finished ? hs : null,
-    awayScore: finished ? as : null,
+    rankLeague: raw.leagueNameAbbr || raw.tournamentShortName || "",
+    homeScore: finished ? scores.homeScore : null,
+    awayScore: finished ? scores.awayScore : null,
+    homeHtScore: scores.homeHtScore,
+    awayHtScore: scores.awayHtScore,
     finished,
     odds: null,
     hhad: null,
     single: false,
     status: "Finished",
     stage: "league",
-    group: raw.leagueNameAbbr || raw.leagueName || "其他",
-    groupLabel: raw.leagueName || "",
+    group: raw.leagueNameAbbr || raw.leagueName || raw.tournamentShortName || "其他",
+    groupLabel: raw.leagueName || raw.tournamentShortName || "",
+    ground: "",
+    ...timeInfo,
+  };
+}
+
+function normalizeUniformResult(raw) {
+  const sid = Number(raw.sportteryMatchId) || 0;
+  if (sid < 2000000 || sid >= 2100000) return null;
+  const scores = extractScores(raw);
+  if (scores.homeScore == null || scores.awayScore == null) return null;
+  const timeInfo = beijingParts(raw.matchDate, raw.matchTime || "00:00:00");
+  const league = raw.tournamentShortName || "";
+  return {
+    id: sid,
+    num: raw.matchNumStr || "",
+    matchNum: raw.matchNum ?? null,
+    round: league,
+    league,
+    leagueShort: league,
+    leagueId: raw.sportteryTournamentId || raw.tournamentId || null,
+    date: raw.matchDate,
+    time: typeof raw.matchTime === "string" ? raw.matchTime : "",
+    businessDate: raw.matchDate,
+    home: raw.homeTeamShortName || raw.homeTeamAllName || raw.homeTeamAbbName,
+    away: raw.awayTeamShortName || raw.awayTeamAllName || raw.awayTeamAbbName,
+    homeRank: null,
+    awayRank: null,
+    rankLeague: league,
+    homeScore: scores.homeScore,
+    awayScore: scores.awayScore,
+    homeHtScore: scores.homeHtScore,
+    awayHtScore: scores.awayHtScore,
+    finished: true,
+    odds: null,
+    hhad: null,
+    single: false,
+    status: "Finished",
+    stage: "league",
+    group: league || "其他",
+    groupLabel: league,
     ground: "",
     ...timeInfo,
   };
@@ -145,7 +262,7 @@ async function fetchUpstream() {
   return data;
 }
 
-async function fetchResults(begin, end, maxPages = 6) {
+async function fetchResultsFromJc(begin, end, maxPages = 6) {
   const headers = {
     ...HEADERS,
     Referer: "https://www.sporttery.cn/jc/zqsgkj/",
@@ -163,7 +280,7 @@ async function fetchResults(begin, end, maxPages = 6) {
       if (!list.length) break;
       for (const raw of list) {
         const m = normalizeResult(raw);
-        if (m?.id == null || seen.has(m.id)) continue;
+        if (m?.id == null || !m.finished || seen.has(m.id)) continue;
         seen.add(m.id);
         all.push(m);
       }
@@ -173,6 +290,54 @@ async function fetchResults(begin, end, maxPages = 6) {
     /* keep what we have */
   }
   return all;
+}
+
+async function fetchResultsFromUniform(seedMatches = [], begin) {
+  const headers = {
+    ...HEADERS,
+    Referer: "https://m.sporttery.cn/zqlszl/bssj/index.html",
+  };
+  const seedIds = [];
+  const seenSeed = new Set();
+  for (const m of seedMatches) {
+    const id = Number(m?.id);
+    if (!Number.isFinite(id) || id < 2000000 || id >= 2100000 || seenSeed.has(id)) continue;
+    seenSeed.add(id);
+    seedIds.push(id);
+    if (seedIds.length >= 12) break;
+  }
+  if (!seedIds.length) return [];
+
+  const map = new Map();
+  await Promise.all(
+    seedIds.map(async (id) => {
+      try {
+        const url = `https://webapi.sporttery.cn/gateway/uniform/football/getMatchResultV1.qry?sportteryMatchId=${id}&termLimits=20`;
+        const res = await fetch(url, { headers });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data?.success) return;
+        const lists = [...(data.value?.home?.matchList || []), ...(data.value?.away?.matchList || [])];
+        for (const raw of lists) {
+          const m = normalizeUniformResult(raw);
+          if (!m?.id || !m.finished) continue;
+          const dateKey = m.beijingDateKey || m.date || "";
+          if (begin && dateKey && dateKey < begin) continue;
+          const prev = map.get(m.id);
+          map.set(m.id, prev ? mergeMatchRecord(prev, m) : m);
+        }
+      } catch {
+        /* ignore one seed */
+      }
+    })
+  );
+  return [...map.values()];
+}
+
+async function fetchResults(begin, end, seedMatches = [], maxPages = 6) {
+  const fromJc = await fetchResultsFromJc(begin, end, maxPages);
+  if (fromJc.length) return fromJc;
+  return fetchResultsFromUniform(seedMatches, begin);
 }
 
 function loadExisting() {
@@ -190,15 +355,17 @@ function mergeHistory(existingHistory, newResults, currentMatches) {
     if (m?.id) map.set(m.id, m);
   }
   for (const m of newResults) {
-    if (m?.id) map.set(m.id, m);
+    if (!m?.id) continue;
+    const prev = map.get(m.id);
+    map.set(m.id, prev ? mergeMatchRecord(prev, m) : m);
   }
   for (const m of currentMatches) {
     if (!m?.id) continue;
     const prev = map.get(m.id);
     if (prev?.finished) {
-      map.set(m.id, { ...m, ...prev, odds: m.odds ?? prev.odds, hhad: m.hhad ?? prev.hhad });
+      map.set(m.id, mergeMatchRecord(m, prev));
     } else {
-      map.set(m.id, { ...prev, ...m, finished: prev?.finished ?? m.finished });
+      map.set(m.id, prev ? mergeMatchRecord(prev, m) : m);
     }
   }
 
@@ -226,7 +393,8 @@ async function main() {
   const startDate = new Date(businessDate);
   startDate.setDate(startDate.getDate() - 30);
   const begin = startDate.toISOString().slice(0, 10);
-  const results = await fetchResults(begin, businessDate);
+  const seedMatches = [...(existing.history || []), ...matches];
+  const results = await fetchResults(begin, businessDate, seedMatches);
 
   const history = mergeHistory(existing.history || [], results, matches);
 
@@ -248,6 +416,7 @@ async function main() {
       matches: matches.length,
       history: history.length,
       newResults: results.length,
+      finished: history.filter((m) => m.finished).length,
     })
   );
 }

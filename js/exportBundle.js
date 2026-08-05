@@ -791,42 +791,68 @@ function normalizeTeamKey(name) {
   return String(name || "")
     .replace(/\s+/g, "")
     .replace(/VS|vs|对阵/g, "")
+    .replace(/足球俱乐部|足球队|俱乐部/g, "")
     .toLowerCase();
+}
+
+function teamNamesLooselyEqual(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+  // 简称过短时避免误伤（如「联合」）
+  if (a.length >= 2 && b.length >= 2) {
+    const short = a.length <= b.length ? a : b;
+    const long = a.length > b.length ? a : b;
+    if (short.length >= 3 && long.includes(short)) return true;
+  }
+  return false;
 }
 
 function parseMatchupTeams(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
-  const parts = raw.split(/\s*(?:VS|vs|对阵|－|-|—)\s*/);
+  // 优先 VS / 对阵，避免队名里的 "-" 被拆坏
+  let parts = raw.split(/\s*(?:VS|vs|Vs|对阵|－|—)\s*/);
+  if (parts.length < 2) parts = raw.split(/\s+-\s+/);
   if (parts.length < 2) return null;
   const home = parts[0].trim();
-  const away = parts.slice(1).join("").trim();
+  const away = parts.slice(1).join(" - ").trim();
   if (!home || !away) return null;
   return { home, away };
 }
 
-function findFinishedMatch(finishedMatches, { num, matchup }) {
-  const numKey = String(num || "").trim();
-  if (numKey) {
-    const byNum = finishedMatches.find(
-      (m) => String(m.num || "").trim() === numKey || String(m.matchNum ?? "").trim() === numKey
-    );
-    if (byNum) return byNum;
-  }
-  const teams = parseMatchupTeams(matchup);
-  if (!teams) return null;
+function matchTeams(finished, teams) {
+  if (!teams) return false;
   const homeKey = normalizeTeamKey(teams.home);
   const awayKey = normalizeTeamKey(teams.away);
-  return (
-    finishedMatches.find((m) => {
-      const mh = normalizeTeamKey(m.home);
-      const ma = normalizeTeamKey(m.away);
-      return (
-        (mh === homeKey || mh.includes(homeKey) || homeKey.includes(mh)) &&
-        (ma === awayKey || ma.includes(awayKey) || awayKey.includes(ma))
-      );
-    }) || null
-  );
+  const mh = normalizeTeamKey(finished.home);
+  const ma = normalizeTeamKey(finished.away);
+  return teamNamesLooselyEqual(mh, homeKey) && teamNamesLooselyEqual(ma, awayKey);
+}
+
+function findFinishedMatch(finishedMatches, { num, matchup }) {
+  const numKey = String(num || "").trim();
+  const teams = parseMatchupTeams(matchup);
+
+  if (numKey) {
+    const numHits = finishedMatches.filter(
+      (m) => String(m.num || "").trim() === numKey || String(m.matchNum ?? "").trim() === numKey
+    );
+    if (numHits.length === 1) {
+      // 有队名时校验，避免周编号串场；对不上则继续用队名匹配
+      if (!teams || matchTeams(numHits[0], teams)) return numHits[0];
+    } else if (numHits.length > 1) {
+      if (teams) {
+        const byTeams = numHits.find((m) => matchTeams(m, teams));
+        if (byTeams) return byTeams;
+      } else {
+        return numHits[0];
+      }
+    }
+  }
+
+  if (!teams) return null;
+  return finishedMatches.find((m) => matchTeams(m, teams)) || null;
 }
 
 /** 按表头识别列；结构不变时兼容用户只改内容 */
@@ -845,16 +871,17 @@ function resolveImportColumns(headerRow) {
   };
   headerRow.eachCell((cell, col) => {
     const t = cellText(cell).replace(/\s+/g, "");
-    if (/场次/.test(t)) map.num = col;
+    // 先匹配「实际*」，避免「实际半全场」被「半全场」抢走
+    if (/实际半全场|实际半场/.test(t)) map.actualHalf = col;
+    else if (/实际赛果/.test(t)) map.actualOutcome = col;
+    else if (/实际比分/.test(t)) map.actualScore = col;
+    else if (/场次/.test(t)) map.num = col;
     else if (/联赛/.test(t)) map.league = col;
     else if (/对战|对阵|队伍/.test(t)) map.matchup = col;
     else if (/简要分析/.test(t) || (/分析/.test(t) && !/每日分析/.test(t))) map.analysis = col;
     else if (/胜负预测|胜平负/.test(t)) map.outcome = col;
     else if (/半全场|半场预测/.test(t)) map.half = col;
     else if (/比分预测/.test(t)) map.scores = col;
-    else if (/实际半全场|实际半场/.test(t)) map.actualHalf = col;
-    else if (/实际赛果/.test(t)) map.actualOutcome = col;
-    else if (/实际比分/.test(t)) map.actualScore = col;
   });
   // 旧表无半场列时：比分在第 6 列
   if (!cellText(headerRow.getCell(map.half)).includes("半场") && /比分/.test(cellText(headerRow.getCell(6)))) {
@@ -899,7 +926,12 @@ export async function gradeImportedWorkbook(file, finishedMatches = []) {
   const headerRowNumber = findHeaderRowNumber(ws);
   const headerRow = ws.getRow(headerRowNumber);
   const cols = resolveImportColumns(headerRow);
-  if (!/实际/.test(cellText(headerRow.getCell(cols.actualOutcome)))) {
+  // 始终保证赛果三列存在（兼容旧表或列被挪走）
+  const needActualHeaders =
+    !/实际赛果/.test(cellText(headerRow.getCell(cols.actualOutcome))) ||
+    !/实际比分/.test(cellText(headerRow.getCell(cols.actualScore))) ||
+    !/实际半全场|实际半场/.test(cellText(headerRow.getCell(cols.actualHalf)));
+  if (needActualHeaders) {
     headerRow.getCell(cols.actualOutcome).value = "实际赛果";
     headerRow.getCell(cols.actualScore).value = "实际比分";
     headerRow.getCell(cols.actualHalf).value = "实际半全场";
