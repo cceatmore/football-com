@@ -445,7 +445,7 @@ function teamAcceptsDraw(row, rules, isCup, probs, sideKey) {
 /**
  * 赛果影响：哪边更被看好、赢/平/输意味着什么、谁更能接受平局
  */
-function buildMatchStakes(match, standingRows = null) {
+export function buildMatchStakes(match, standingRows = null) {
   const leagueKey = match.leagueShort || match.group || "";
   const rules = LEAGUE_STAKE_RULES[leagueKey] || null;
   const isCup = isCupCompetition(match);

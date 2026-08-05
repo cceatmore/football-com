@@ -18,6 +18,7 @@ import {
   fetchInjuryAnalysis,
   clearPredictionCache,
   ANALYSIS_SCHEMA,
+  buildMatchStakes,
   probBarHtml,
   outcomeClass,
   injuryReportHtml,
@@ -412,10 +413,14 @@ async function collectMatchExportData(match, onProgress) {
       sources: [],
       consensus: { pick: null, bullets: [], goals: null },
       injury,
-      stakes: null,
+      stakes: buildMatchStakes(match, null),
     };
   } else {
-    analysis = { ...analysis, injury: analysis.injury || injury };
+    analysis = {
+      ...analysis,
+      injury: analysis.injury || injury,
+      stakes: analysis.stakes || buildMatchStakes(match, null),
+    };
   }
   analysis = { ...analysis, form };
   const scoreOutlook = buildScoreOutlook(match, form, analysis.consensus?.goals);
@@ -1335,8 +1340,22 @@ function buildExcelOutcomeLabel(analysis, scoreOutlook, match = null) {
   return labels.slice(0, 2).join("、") || "—";
 }
 
+/** 最常见的「默认三件套」，挑选时刻意打散，避免比分预测总是 1-1/1-2/2-1 */
+const COMMON_SCORE_KEYS = new Set(["1-1", "1-2", "2-1"]);
+
+function scoreKey(h, a) {
+  return `${h}-${a}`;
+}
+
+function scoreOutcome(h, a) {
+  if (h > a) return "H";
+  if (h < a) return "A";
+  return "D";
+}
+
 /**
- * 比分预测：按进球走势加权，避免一味小比分；大球/大比分时给出更高比分选项
+ * 比分预测：按进球走势加权，并强制多样性——不局限在 1-1/1-2/2-1，
+ * 按小球/大球/一边倒走势穿插 0-0、3-1、2-2、3-0 等参考比分。
  */
 function buildExcelScoreLabel(scoreOutlook) {
   if (!scoreOutlook || scoreOutlook.pending) return "—";
@@ -1350,6 +1369,7 @@ function buildExcelScoreLabel(scoreOutlook) {
   const lean = String(scoreOutlook.lean || "");
   const expected = scoreOutlook.expected ?? lh + la;
   const maxGoals = expected >= 3.2 || /大比分/.test(lean) ? 6 : expected >= 2.6 || /大球/.test(lean) ? 5 : 4;
+  const marginLam = lh - la;
   const grid = [];
   for (let h = 0; h <= maxGoals; h += 1) {
     for (let a = 0; a <= maxGoals; a += 1) {
@@ -1367,34 +1387,117 @@ function buildExcelScoreLabel(scoreOutlook) {
         if (total <= 2) boost = 1.35;
         else if (total >= 4) boost = 0.55;
       } else {
-        // 中性：按期望进球轻微拉开高低比分
         if (expected >= 2.8 && total >= 3) boost = 1.12;
         if (expected <= 2.2 && total <= 2) boost = 1.12;
       }
-      // 一边倒时抬高符合净胜方向的比分
-      if (lh - la >= 0.55 && h > a) boost *= 1.08;
-      if (la - lh >= 0.55 && a > h) boost *= 1.08;
-      grid.push({ h, a, p, score: p * boost, total, margin });
+      if (marginLam >= 0.55 && h > a) boost *= 1.08;
+      if (marginLam <= -0.55 && a > h) boost *= 1.08;
+      // 轻微压低默认三件套，给其他合理比分腾位置
+      if (COMMON_SCORE_KEYS.has(scoreKey(h, a))) boost *= 0.88;
+      // 按走势抬高「非常见但合理」参考分
+      if (h === 0 && a === 0 && (/偏小球/.test(lean) || expected <= 2.15)) boost *= 1.28;
+      if (h === a && h >= 2 && (/偏大球|偏大比分/.test(lean) || expected >= 2.75)) boost *= 1.22;
+      if (margin >= 2 && total >= 3) {
+        if (marginLam >= 0.4 && h > a) boost *= 1.18;
+        if (marginLam <= -0.4 && a > h) boost *= 1.18;
+        if (/偏大比分/.test(lean)) boost *= 1.12;
+      }
+      if (total >= 4 && (/偏大球|偏大比分/.test(lean) || expected >= 3.0)) boost *= 1.15;
+      grid.push({ h, a, p, score: p * boost, total, margin, outcome: scoreOutcome(h, a) });
     }
   }
   grid.sort((a, b) => b.score - a.score || b.p - a.p);
 
   const picked = [];
+  const seenKey = new Set();
   const seenTotal = new Set();
+  const seenOutcome = new Set();
+  const seenMarginBucket = new Set();
+
+  const marginBucket = (g) => (g.margin === 0 ? "draw" : g.margin === 1 ? "one" : "wide");
+  const isCommon = (g) => COMMON_SCORE_KEYS.has(scoreKey(g.h, g.a));
+
+  const tryPush = (g, { relax = false } = {}) => {
+    if (!g || picked.length >= 3) return false;
+    const key = scoreKey(g.h, g.a);
+    if (seenKey.has(key)) return false;
+    if (!relax) {
+      // 总进球尽量分散
+      if (picked.length >= 1 && seenTotal.has(g.total) && seenTotal.size < 2) return false;
+      // 胜平负方向尽量不重复占满
+      if (picked.length >= 2 && seenOutcome.has(g.outcome) && seenOutcome.size === 1) return false;
+      // 净胜分档分散：别三个都是一球小胜
+      if (picked.length >= 1 && seenMarginBucket.has(marginBucket(g)) && seenMarginBucket.size < 2 && picked.length < 2) {
+        return false;
+      }
+      // 已有两个默认三件套时，第三个强制换非常见分
+      if (picked.filter(isCommon).length >= 2 && isCommon(g)) return false;
+    }
+    picked.push(g);
+    seenKey.add(key);
+    seenTotal.add(g.total);
+    seenOutcome.add(g.outcome);
+    seenMarginBucket.add(marginBucket(g));
+    return true;
+  };
+
+  // 第一轮：按加权概率挑，带多样性约束
   for (const g of grid) {
     if (picked.length >= 3) break;
-    // 尽量让 3 个比分的总进球有差异，避免全是 1-x / x-1 小分
-    const totalKey = g.total;
-    if (picked.length >= 1 && seenTotal.has(totalKey) && picked.length < 2) continue;
-    if (picked.length === 2 && seenTotal.size < 2 && seenTotal.has(totalKey)) continue;
-    picked.push(g);
-    seenTotal.add(totalKey);
+    tryPush(g);
   }
+  // 第二轮：放宽约束补满
+  for (const g of grid) {
+    if (picked.length >= 3) break;
+    tryPush(g, { relax: true });
+  }
+
+  // 若仍扎堆在 1-1/1-2/2-1，用走势匹配的参考分替换最后一个
+  if (picked.filter(isCommon).length >= 2) {
+    const ref =
+      grid.find((g) => {
+        if (seenKey.has(scoreKey(g.h, g.a)) || isCommon(g)) return false;
+        if (/偏小球/.test(lean) || expected <= 2.2) return g.total <= 2; // 0-0 / 1-0 / 0-1
+        if (/偏大比分/.test(lean) || Math.abs(marginLam) >= 0.7) return g.margin >= 2 && g.total >= 3;
+        if (/偏大球/.test(lean) || expected >= 2.8) return g.total >= 3 && (g.margin >= 2 || g.h === g.a);
+        // 中性：优先 0-0、2-0、0-2、2-2、3-1 一类
+        return g.total !== 3 || g.margin !== 1;
+      }) ||
+      grid.find((g) => !seenKey.has(scoreKey(g.h, g.a)) && !isCommon(g));
+    if (ref) {
+      const idx = picked.findIndex(isCommon);
+      if (idx >= 0) picked[idx === 0 && picked.length > 1 ? picked.length - 1 : idx] = ref;
+    }
+  }
+
   // 大球/大比分时保证至少一个总进球≥3
   if ((/偏大球|偏大比分/.test(lean) || expected >= 2.9) && picked.every((x) => x.total < 3)) {
-    const big = grid.find((g) => g.total >= 3);
+    const big = grid.find((g) => g.total >= 3 && !COMMON_SCORE_KEYS.has(scoreKey(g.h, g.a))) || grid.find((g) => g.total >= 3);
     if (big) picked[picked.length - 1] = big;
   }
+  // 小球时偶尔给出 0-0 参考
+  if ((/偏小球/.test(lean) || expected <= 2.1) && !picked.some((x) => x.h === 0 && x.a === 0)) {
+    const zz = grid.find((g) => g.h === 0 && g.a === 0);
+    if (zz && zz.p >= (picked[picked.length - 1]?.p || 0) * 0.45) {
+      picked[picked.length - 1] = zz;
+    }
+  }
+
+  // 中性场次若仍全是 0/1 球小分，换一个 2-0 / 0-2 / 2-2 作参考
+  const onlyTiny = picked.every((x) => x.total <= 2 && x.margin <= 1);
+  if (onlyTiny && expected >= 2.2 && !/偏小球/.test(lean)) {
+    const nowKeys = new Set(picked.map((x) => scoreKey(x.h, x.a)));
+    const alt = grid.find((g) => {
+      if (nowKeys.has(scoreKey(g.h, g.a))) return false;
+      if (marginLam >= 0.25) return (g.h === 2 && g.a === 0) || (g.h === 3 && g.a === 1);
+      if (marginLam <= -0.25) return (g.h === 0 && g.a === 2) || (g.h === 1 && g.a === 3);
+      return (g.h === 2 && g.a === 2) || (g.h === 2 && g.a === 0) || (g.h === 0 && g.a === 2);
+    });
+    if (alt && alt.p >= (picked[picked.length - 1]?.p || 0) * 0.35) {
+      picked[picked.length - 1] = alt;
+    }
+  }
+
   return picked.map((s) => `${s.h}-${s.a}`).join("、") || "—";
 }
 
@@ -1490,129 +1593,235 @@ function buildExcelHalfFullLabel(match, form, scoreOutlook = null) {
   return top.map((c) => c.label).join("、");
 }
 
+/** 近况胜平负快照，供简要分析转译成定性表述 */
+function formRecordSnapshot(matches, team) {
+  let w = 0;
+  let d = 0;
+  let l = 0;
+  for (const m of matches || []) {
+    const result = teamResultLabel(m, team);
+    if (result === "胜") w += 1;
+    else if (result === "平") d += 1;
+    else if (result === "负") l += 1;
+  }
+  const n = w + d + l;
+  if (!n) return null;
+  return { w, d, l, n, winRate: w / n, pointsRate: (w * 3 + d) / (n * 3) };
+}
+
+function qualitativeFormPhrase(team, snap, { venue = "" } = {}) {
+  if (!snap) return "";
+  const prefix = venue ? `${team}${venue}` : team;
+  if (snap.winRate >= 0.7 || snap.pointsRate >= 0.72) return `${prefix}近况火热`;
+  if (snap.winRate <= 0.25 || snap.pointsRate <= 0.3) return `${prefix}近况低迷`;
+  if (snap.l >= snap.w + 2) return `${prefix}近期起伏偏大、输球偏多`;
+  if (snap.d >= Math.ceil(snap.n * 0.4)) return `${prefix}近期平局偏多、打开局面困难`;
+  return `${prefix}近况中规中矩`;
+}
+
+/** 把伤停转成战术影响，而不是“伤停N人”清单 */
+function injuryImpactPhrase(side, team) {
+  if (!side?.total) return "";
+  const byPos = side.byPos || {};
+  const defN = Number(byPos["后卫"] || 0);
+  const midN = Number(byPos["中场"] || 0);
+  const fwdN = Number(byPos["前锋"] || 0);
+  const gkN = Number(byPos["门将"] || 0);
+  if (defN >= 3 || (defN >= 2 && side.total >= 4)) {
+    return `${team}防线伤病较重，只能用替补甚至年轻人顶上`;
+  }
+  if (fwdN >= 2 || (fwdN >= 1 && side.total >= 3 && fwdN >= midN && fwdN >= defN)) {
+    return `${team}锋线主力缺阵，进球效率可能下滑`;
+  }
+  if (midN >= 2 && midN >= defN) {
+    return `${team}中场轮转吃紧，组织和控场会受影响`;
+  }
+  if (gkN >= 1 && side.total <= 2) {
+    return `${team}门将位置有变动，后防稳定性存疑`;
+  }
+  if (side.total >= 4) return `${team}主力伤停偏多，阵容完整度吃亏`;
+  if (side.total >= 2) return `${team}有主力伤停，临场完整度略逊`;
+  return `${team}有个别主力缺阵`;
+}
+
+function venueStrengthPhrase(team, stats, role) {
+  if (!stats?.n || stats.n < 3) return "";
+  const solid = stats.avgAgainst <= 0.95 && stats.avgFor >= 1.15;
+  const leaky = stats.avgAgainst >= 1.55;
+  const blunt = stats.avgFor <= 0.85;
+  const open = stats.avgTotal >= 2.9 || (stats.over25Rate != null && stats.over25Rate >= 0.58);
+  const tight = stats.avgTotal <= 2.05 || (stats.over25Rate != null && stats.over25Rate <= 0.38);
+  if (role === "home") {
+    if (solid && !blunt) return `${team}主场防守扎实、压制力在`;
+    if (leaky && open) return `${team}主场攻防都偏开放，容易打出对攻`;
+    if (blunt && tight) return `${team}主场进攻偏钝、场面偏胶着`;
+    if (solid) return `${team}主场防守硬度不错`;
+    if (leaky) return `${team}主场后防并不稳`;
+  } else {
+    if (blunt && leaky) return `${team}客场攻防两端都吃力`;
+    if (blunt) return `${team}客场进球困难`;
+    if (solid) return `${team}客场防守仍能站住`;
+    if (leaky && open) return `${team}客场防守偏软、比赛容易进球`;
+    if (tight) return `${team}客场偏谨慎、少进球`;
+  }
+  return "";
+}
+
+/**
+ * Excel「简要分析」：叙事博弈文风（赛程优先级 / 伤停影响 / 主客因素 / 比赛进程）
+ * 避免堆场均、大球率等原始数字。
+ */
 function buildExcelBriefAnalysis(match, form, analysis, scoreOutlook = null) {
-  const parts = [];
   const home = match.home;
   const away = match.away;
   const league = match.leagueShort || match.league || "";
+  const stakes = analysis?.stakes;
+  const isCup = !!(stakes?.isCup || /杯|cup|资格|knockout|copa/i.test(league));
+  const clauses = [];
 
-  if (league) {
-    parts.push(`${league}${analysis?.stakes?.isCup || /杯|cup/i.test(league) ? "（杯赛属性，临场或有轮换）" : ""}`);
-  }
-
-  if (match.homeRank != null || match.awayRank != null) {
-    parts.push(
-      `积分排名：主队${home}第${match.homeRank ?? "?"}，客队${away}第${match.awayRank ?? "?"}${
-        match.homeRank != null && match.awayRank != null
-          ? match.homeRank < match.awayRank
-            ? "，主队排名占优"
-            : match.awayRank < match.homeRank
-              ? "，客队排名占优"
-              : "，双方排名接近"
-          : ""
-      }`
+  // 1) 赛事语境与积分压力
+  const hz = stakes?.home?.zone;
+  const az = stakes?.away?.zone;
+  const bothRelegate = /降级/.test(hz || "") && /降级/.test(az || "");
+  const bothTitle = /争冠|欧战/.test(hz || "") && /争冠|欧战/.test(az || "");
+  if (isCup && bothRelegate) {
+    clauses.push(
+      `${league || "杯赛"}对阵，双方联赛都在保级区，杯赛投入度存疑，更可能以防守和稳妥为主`
     );
+  } else if (isCup && bothTitle) {
+    clauses.push(`${league || "杯赛"}焦点战，双方都有欧战经验与班底厚度，谁都不想早早丢掉主动`);
+  } else if (isCup) {
+    clauses.push(`${league || "杯赛"}属性，赢球偏晋级、输球风险更大，临场或有轮换，开局通常偏谨慎`);
+  } else if (bothRelegate) {
+    clauses.push("联赛保级区对决，双方都输不起，场面容易谨慎胶着");
+  } else if (hz && az && hz !== "中游" && az !== "中游") {
+    clauses.push(`${home}处${hz}、${away}处${az}，本场赛果对积分形势都有实质影响`);
+  } else if (hz && /降级|争冠|欧战/.test(hz)) {
+    clauses.push(`${home}身在${hz}，主场求分意愿更强`);
+  } else if (az && /降级|争冠|欧战/.test(az)) {
+    clauses.push(`${away}身在${az}，客场也会把拿分放在前面`);
+  } else if (league) {
+    clauses.push(`${league}对阵`);
   }
 
-  if (form?.home?.length) parts.push(`主队近10场${formStatText(form.home, home)}`);
-  if (form?.away?.length) parts.push(`客队近10场${formStatText(form.away, away)}`);
+  // 2) 近况状态（定性）
+  const homeSnap = formRecordSnapshot(form?.home, home);
+  const awaySnap = formRecordSnapshot(form?.away, away);
+  const homeForm = qualitativeFormPhrase(home, homeSnap);
+  const awayForm = qualitativeFormPhrase(away, awaySnap);
+  if (homeForm && awayForm) {
+    if (homeSnap.winRate - awaySnap.winRate >= 0.25) {
+      clauses.push(`${homeForm}，相较之下${away}近况更弱`);
+    } else if (awaySnap.winRate - homeSnap.winRate >= 0.25) {
+      clauses.push(`${awayForm}，主队近况相对更逊`);
+    } else if (/火热/.test(homeForm) && /火热/.test(awayForm)) {
+      clauses.push("双方近况都不错，更看谁能把状态带到本场");
+    } else if (/低迷/.test(homeForm) && /低迷/.test(awayForm)) {
+      clauses.push("双方近况都一般，谁先找到破局点谁占优");
+    } else {
+      clauses.push(`${homeForm}，${awayForm}`);
+    }
+  } else if (homeForm) clauses.push(homeForm);
+  else if (awayForm) clauses.push(awayForm);
 
-  // 主客场进球结构
+  // 3) 主客场因素（定性，不写场均数字）
   const homeVenue =
     scoreOutlook?.homeAtHome ||
     teamGoalsStats(form?.scoreHome || form?.home || [], home, { venue: "home" });
   const awayVenue =
     scoreOutlook?.awayAtAway ||
     teamGoalsStats(form?.scoreAway || form?.away || [], away, { venue: "away" });
-  if (homeVenue?.n) {
-    parts.push(
-      `主队主场近${homeVenue.n}场场均进${homeVenue.avgFor.toFixed(1)}失${homeVenue.avgAgainst.toFixed(1)}，大球率${Math.round((homeVenue.over25Rate || 0) * 100)}%`
-    );
-  }
-  if (awayVenue?.n) {
-    parts.push(
-      `客队客场近${awayVenue.n}场场均进${awayVenue.avgFor.toFixed(1)}失${awayVenue.avgAgainst.toFixed(1)}，大球率${Math.round((awayVenue.over25Rate || 0) * 100)}%`
-    );
-  }
+  const homeVenuePhrase = venueStrengthPhrase(home, homeVenue, "home");
+  const awayVenuePhrase = venueStrengthPhrase(away, awayVenue, "away");
+  if (homeVenuePhrase && awayVenuePhrase) clauses.push(`${homeVenuePhrase}，${awayVenuePhrase}`);
+  else if (homeVenuePhrase) clauses.push(homeVenuePhrase);
+  else if (awayVenuePhrase) clauses.push(awayVenuePhrase);
 
-  if (scoreOutlook && !scoreOutlook.pending) {
-    const bits = [];
-    if (scoreOutlook.lambdaHome != null && scoreOutlook.lambdaAway != null) {
-      bits.push(
-        `期望进球约主${scoreOutlook.lambdaHome.toFixed(2)}:客${scoreOutlook.lambdaAway.toFixed(2)}`
-      );
-    }
-    if (scoreOutlook.lean) bits.push(scoreOutlook.lean);
-    if (scoreOutlook.over25 != null) bits.push(`大2.5约${Math.round(scoreOutlook.over25 * 100)}%`);
-    if (scoreOutlook.btts != null) bits.push(`双方进球约${Math.round(scoreOutlook.btts * 100)}%`);
-    if (bits.length) parts.push(`进球走势：${bits.join("，")}`);
-  }
-
-  // 比赛节奏
-  const tempo = form?.tempoStyle;
-  if (tempo?.matchup) {
-    parts.push(`节奏风格：${tempo.matchup.replace(/。$/, "")}`);
-  } else if (tempo?.tips?.length) {
-    parts.push(`节奏风格：${tempo.tips.join("；")}`);
-  }
-
-  // 伤停（含位置）
+  // 4) 伤停影响
   const inj = analysis?.injury;
-  if (inj?.home?.total) {
-    const detail = inj.home.lines?.length ? `（${inj.home.lines.join("、")}）` : "";
-    parts.push(`主队主力伤停${inj.home.total}人${detail}`);
-  } else if (inj && !inj.home?.total) {
-    parts.push("主队暂无明显主力伤停");
-  }
-  if (inj?.away?.total) {
-    const detail = inj.away.lines?.length ? `（${inj.away.lines.join("、")}）` : "";
-    parts.push(`客队主力伤停${inj.away.total}人${detail}`);
-  } else if (inj && !inj.away?.total) {
-    parts.push("客队暂无明显主力伤停");
+  const homeInj = injuryImpactPhrase(inj?.home, home);
+  const awayInj = injuryImpactPhrase(inj?.away, away);
+  if (homeInj && awayInj) clauses.push(`${homeInj}，${awayInj}`);
+  else if (homeInj) clauses.push(homeInj);
+  else if (awayInj) clauses.push(awayInj);
+  else if (inj && !inj.home?.total && !inj.away?.total) {
+    clauses.push("双方主力阵容相对齐整");
   }
 
-  // 赛果影响 / 积分形势
-  const stakes = analysis?.stakes;
-  if (stakes?.bullets?.length) {
-    for (const b of stakes.bullets.slice(0, 3)) {
-      if (b) parts.push(String(b).replace(/^积分形势：/, ""));
-    }
-  } else if (stakes?.isCup) {
-    parts.push("杯赛对阵，赢球偏晋级、输球风险更大，双方或有轮换");
+  // 5) 可接受平局 / 博弈心理
+  if (stakes?.home?.acceptDraw && stakes?.away?.acceptDraw) {
+    clauses.push("双方都能接受平局，首开纪录前大概率谨慎试探");
+  } else if (stakes?.home?.acceptDraw && !stakes?.away?.acceptDraw) {
+    clauses.push(`${home}更能接受平局，${away}相对更需要拿分`);
+  } else if (!stakes?.home?.acceptDraw && stakes?.away?.acceptDraw) {
+    clauses.push(`${away}更能接受平局，主队主场求胜动机更强`);
   }
-  if (stakes?.home?.acceptDrawNote) parts.push(`${home}：${stakes.home.acceptDrawNote}`);
-  if (stakes?.away?.acceptDrawNote) parts.push(`${away}：${stakes.away.acceptDrawNote}`);
 
-  // 共同对手
+  // 6) 共同对手只取一句定性结论
   const common = form?.commonOpponents;
-  if (common?.summary?.counted) {
-    parts.push(common.summary.text);
-    for (const it of (common.items || []).slice(0, 2)) {
-      if (it?.note) parts.push(`对${it.opponent}：${it.note}`);
-    }
+  if (common?.summary?.edge === "home") {
+    clauses.push(`参照共同对手，${home}略占上风`);
+  } else if (common?.summary?.edge === "away") {
+    clauses.push(`参照共同对手，${away}略占上风`);
   }
 
-  const agency = (analysis?.sources || []).filter((s) => !s.local);
-  if (agency.length) {
-    if (analysis?.consensus?.bullets?.[0]) parts.push(analysis.consensus.bullets[0]);
-    const tip = agency.find((s) => s.tipText)?.tipText;
-    if (tip) {
-      const short = String(tip).replace(/\s+/g, " ").slice(0, 80);
-      parts.push(`机构摘要：${short}${tip.length > 80 ? "…" : ""}`);
-    }
-  }
+  // 7) 进球格局（定性）+ 比赛进程预演
+  const lean = String(scoreOutlook?.lean || "");
+  const tempo = form?.tempoStyle;
+  const lh = scoreOutlook?.lambdaHome;
+  const la = scoreOutlook?.lambdaAway;
+  const margin = lh != null && la != null ? lh - la : null;
 
-  if (!parts.length) return "情报样本不足，请结合临场信息判断。";
-  // 去重并保留较完整叙述
+  if (/偏小球/.test(lean)) clauses.push("进球空间有限，更偏向小比分");
+  else if (/偏大比分/.test(lean)) clauses.push("场面一旦打开，大比分并不意外");
+  else if (/偏大球/.test(lean)) clauses.push("双方都有进球能力，比赛更容易打出进球");
+
+  let flow = "";
+  const hk = tempo?.home?.key || "";
+  const ak = tempo?.away?.key || "";
+  if (margin != null && margin >= 0.55 && /early-attack|solid-attack/.test(hk)) {
+    flow = "主队主场压制力更强，更可能早早取得领先";
+  } else if (margin != null && margin <= -0.45) {
+    flow = "客队质量占优，但客场会先稳住，半场僵持后再图掌控";
+  } else if (hk === "early-attack" && ak === "late-surge") {
+    flow = `${home}更可能上半场施压，${away}更可能下半场发力`;
+  } else if (hk === "late-surge" && ak === "early-attack") {
+    flow = `${away}开局威胁更大，${home}需熬过上半场再图反扑`;
+  } else if (hk === "low-block" || ak === "low-block") {
+    flow = "上半场谨慎试探，下半场才可能打开局面";
+  } else if (hk === "late-surge" || ak === "late-surge") {
+    flow = "上半场僵持概率大，下半场比分变化更关键";
+  } else if (hk === "open-game" && ak === "open-game") {
+    flow = "双方都偏开放，开局就可能互有威胁";
+  } else if (hk === "early-attack" && ak === "early-attack") {
+    flow = "双方都偏上半场进球，开局阶段威胁更大";
+  } else if (hk === "absorb-counter" || ak === "absorb-counter") {
+    flow = "比赛可能先抑后扬，下半场反击更关键";
+  } else if (stakes?.home?.acceptDraw && stakes?.away?.acceptDraw) {
+    flow = "上半场互摸底，下半场才可能分出胜负";
+  } else if (isCup) {
+    flow = "杯赛心态下，上半场多半谨慎，下半场再发力";
+  } else {
+    flow = "上半场试探为主，下半场再决定比赛走势";
+  }
+  clauses.push(flow);
+
+  // 去噪、去重，压成一段连贯短文
   const uniq = [];
   const seen = new Set();
-  for (const p of parts) {
-    const key = p.replace(/\s+/g, "");
-    if (!key || seen.has(key)) continue;
+  for (const raw of clauses) {
+    const p = String(raw || "")
+      .replace(/\s+/g, "")
+      .replace(/[。；;]+$/g, "")
+      .trim();
+    if (!p || p.length < 4) continue;
+    const key = p.slice(0, 18);
+    if (seen.has(key)) continue;
     seen.add(key);
     uniq.push(p);
   }
-  return `${uniq.slice(0, 12).join("。")}。`;
+  if (!uniq.length) return "情报样本不足，请结合临场伤停与首发再判断。";
+  return `${uniq.slice(0, 7).join("，")}。`;
 }
 
 function blendRate(formRate, webRate, formWeight = 0.6) {
