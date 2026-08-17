@@ -227,47 +227,63 @@ function findBridgeMatchId(histories, team) {
   return null;
 }
 
+function preferFinishedMatches(list, limit) {
+  const all = list || [];
+  const finished = all.filter((m) => m?.finished);
+  const picked = finished.length ? finished : all;
+  return picked.slice(0, limit);
+}
+
 /**
  * 拉取球队近期对局：优先用相关场次 matchId，必要时经桥接场次再取。
+ * @param {string} sideHint 已知主/客身份时传入 "home"|"away"，避免全称/简称对不上导致取错侧或取空
  */
 export async function fetchTeamRecentForm(
   team,
-  { matchId = null, bridgeMatchId = null, localMatches = [], limit = RECENT_MATCH_LIMIT } = {}
+  {
+    matchId = null,
+    bridgeMatchId = null,
+    localMatches = [],
+    limit = RECENT_MATCH_LIMIT,
+    sideHint = null,
+  } = {}
 ) {
-  const local = collectLocalTeamMatches(localMatches, team, limit);
+  const local = collectLocalTeamMatches(localMatches, team, Math.max(limit, RECENT_MATCH_LIMIT));
 
   const tryMatchId = async (id) => {
     if (id == null) return null;
     const histories = await fetchTeamHistories(id, Math.max(limit, RECENT_MATCH_LIMIT));
-    const side = historiesSideForTeam(histories, team);
+    const side = sideHint || historiesSideForTeam(histories, team);
     if (!side) return { histories, matches: null };
+    // 多取一些再筛完赛，避免未赛/无比分场次占满窗口
+    const raw = getTeamHistoryList(histories, side, local, team, null, Math.max(limit * 2, 20));
     return {
       histories,
-      matches: getTeamHistoryList(histories, side, local, team, null, limit),
+      matches: preferFinishedMatches(raw, limit),
     };
   };
 
   let result = await tryMatchId(matchId);
-  if (result?.matches?.length) return result.matches.slice(0, limit);
+  if (result?.matches?.length) return result.matches;
 
   if (bridgeMatchId && bridgeMatchId !== matchId) {
     result = await tryMatchId(bridgeMatchId);
-    if (result?.matches?.length) return result.matches.slice(0, limit);
+    if (result?.matches?.length) return result.matches;
 
     const bridgedId = findBridgeMatchId(result?.histories, team);
     if (bridgedId && bridgedId !== bridgeMatchId && bridgedId !== matchId) {
       const bridged = await tryMatchId(bridgedId);
-      if (bridged?.matches?.length) return bridged.matches.slice(0, limit);
+      if (bridged?.matches?.length) return bridged.matches;
     }
   } else if (result?.histories) {
     const bridgedId = findBridgeMatchId(result.histories, team);
     if (bridgedId && bridgedId !== matchId) {
       const bridged = await tryMatchId(bridgedId);
-      if (bridged?.matches?.length) return bridged.matches.slice(0, limit);
+      if (bridged?.matches?.length) return bridged.matches;
     }
   }
 
-  return local;
+  return preferFinishedMatches(local, limit);
 }
 
 export function getH2hList(histories, limit = H2H_MATCH_LIMIT) {
@@ -324,15 +340,32 @@ export function clearMatchHistoryCache() {
   cache.clear();
 }
 
+function teamNormKey(name) {
+  return String(name || "")
+    .replace(/^AIK/i, "")
+    .replace(/足球俱乐部|足球队|俱乐部/g, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+}
+
+/** 全称/简称宽松匹配（开售全称 vs 战绩简称） */
+export function teamNamesLooselyEqual(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const ka = teamNormKey(a);
+  const kb = teamNormKey(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  if (ka.includes(kb) || kb.includes(ka)) return true;
+  return false;
+}
+
 export function resolveTeamInMatch(match, team) {
-  if (!match || !team) return team;
-  if (match.home === team || match.away === team) return team;
-  const normalize = (name) => String(name || "").replace(/^AIK/i, "").trim();
-  const target = normalize(team);
-  if (normalize(match.home) === target) return match.home;
-  if (normalize(match.away) === target) return match.away;
-  if (match.home.includes(team) || team.includes(match.home)) return match.home;
-  if (match.away.includes(team) || team.includes(match.away)) return match.away;
+  if (!match || !team) return null;
+  if (match.home === team) return match.home;
+  if (match.away === team) return match.away;
+  if (teamNamesLooselyEqual(match.home, team)) return match.home;
+  if (teamNamesLooselyEqual(match.away, team)) return match.away;
   return null;
 }
 
@@ -342,8 +375,10 @@ export function teamResultLabel(match, team) {
 
   const resolved = resolveTeamInMatch(match, team);
   const fromApi = lotteryResultToLabel(match.teamMatchResult);
-  // teamMatchResult 是该战绩所属球队视角；仅在队名能对上时采信
+  // teamMatchResult 是该战绩所属球队视角；队名对上时采信
   if (fromApi && resolved) return fromApi;
+  // 战绩列表场景：接口结果属于该条所属球队；队名短暂对不上时仍用接口结果，避免整列置灰「未赛」
+  if (fromApi) return fromApi;
 
   if (!resolved) return "未赛";
 
@@ -384,13 +419,6 @@ export function findTeamMatchMeta(match, team) {
   const resolved = resolveTeamInMatch(match, team);
   if (resolved === match.home || resolved === match.away) return match;
   return null;
-}
-
-function teamNormKey(name) {
-  return String(name || "")
-    .replace(/^AIK/i, "")
-    .replace(/\s+/g, "")
-    .toLowerCase();
 }
 
 function sidePerspective(match, team) {

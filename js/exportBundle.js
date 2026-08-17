@@ -278,48 +278,185 @@ function drawRecentBlock(ctx, teamName, matches, y0) {
   return y + 16;
 }
 
-/** 双方近 10 场竖屏图（同图，每场不同底色；高度随内容） */
-export async function renderRecentFormImage(match, homeMatches, awayMatches) {
-  const home = (homeMatches || []).filter((m) => m.finished).slice(0, 10);
-  const away = (awayMatches || []).filter((m) => m.finished).slice(0, 10);
+function measureH2hRow(ctx, match, maxW) {
+  const when = formatMatchWhen(match) || match.date || "";
+  const score = scoreDetail(match);
+  ctx.font = `600 26px ${FONT}`;
+  let h = wrapLines(ctx, `${when}  ${teamLabel(match.home)} VS ${teamLabel(match.away)}`, maxW).length * 34;
+  ctx.font = `400 24px ${FONT}`;
+  h += wrapLines(ctx, score, maxW - 80).length * 30;
+  return h + 28;
+}
 
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
-  ctx.font = `400 26px ${FONT}`;
+function measureH2hBlock(ctx, matches) {
+  const maxW = PHONE_W - PAD * 2 - 40;
+  let h = 52;
+  if (!matches.length) return h + 56;
+  for (const m of matches) h += measureH2hRow(ctx, m, maxW) + 12;
+  return h + 8;
+}
 
-  let height = 220;
-  height += measureRecentBlock(ctx, match.home, home) + 24;
-  height += measureRecentBlock(ctx, match.away, away) + 24;
-  height += 72;
+function drawH2hRow(ctx, match, index, homeTeam, x, y, w) {
+  const maxW = w - 40;
+  const rowH = measureH2hRow(ctx, match, maxW);
+  const bg = MATCH_ROW_COLORS[index % MATCH_ROW_COLORS.length];
+  const result = teamResultLabel(match, homeTeam);
 
-  canvas.width = PHONE_W;
-  canvas.height = Math.ceil(height);
-  fillBackground(ctx, PHONE_W, canvas.height);
+  ctx.fillStyle = bg;
+  roundRect(ctx, x, y, w, rowH, 14);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.06)";
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, rowH, 14);
+  ctx.stroke();
 
-  let y = 72;
-  y = drawHeader(ctx, match, "近期战绩", y);
-  y = drawRecentBlock(ctx, match.home, home, y);
-  y = drawRecentBlock(ctx, match.away, away, y);
+  const when = formatMatchWhen(match) || match.date || "";
+  let ty = y + 32;
+  ctx.fillStyle = "rgba(17, 24, 39, 0.45)";
+  ctx.font = `700 20px ${FONT}`;
+  ctx.fillText(`${index + 1}`, x + 14, ty - 8);
 
-  ctx.fillStyle = "#9ca3af";
-  ctx.font = `400 22px ${FONT}`;
-  ctx.fillText("双方近10场同图 · 每场不同底色区分 · 含半场/全场/加时/点球", PAD, y + 8);
-  y += 48;
+  ctx.fillStyle = "#111827";
+  ctx.font = `600 26px ${FONT}`;
+  for (const t of wrapLines(ctx, `${when}  ${teamLabel(match.home)} VS ${teamLabel(match.away)}`, maxW - 24)) {
+    ctx.fillText(t, x + 36, ty);
+    ty += 34;
+  }
+  ctx.fillStyle = "#4b5563";
+  ctx.font = `400 24px ${FONT}`;
+  for (const t of wrapLines(ctx, scoreDetail(match), maxW - 80)) {
+    ctx.fillText(t, x + 36, ty);
+    ty += 30;
+  }
 
+  ctx.fillStyle = RESULT_COLOR[result] || "#6b7280";
+  ctx.font = `700 28px ${FONT}`;
+  ctx.fillText(result, x + w - 56, y + 36);
+  return y + rowH + 12;
+}
+
+function drawH2hBlock(ctx, matches, homeTeam, y0) {
+  const boxX = PAD;
+  const boxW = PHONE_W - PAD * 2;
+  let y = y0;
+
+  ctx.fillStyle = "#111827";
+  ctx.font = `700 34px ${FONT}`;
+  ctx.fillText(`双方交手历史（${teamLabel(homeTeam)}视角）`, boxX, y);
+  y += 44;
+
+  if (!matches.length) {
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, boxX, y, boxW, 64, 14);
+    ctx.fill();
+    ctx.fillStyle = "#9ca3af";
+    ctx.font = `400 28px ${FONT}`;
+    ctx.fillText("暂无交手记录", boxX + 24, y + 40);
+    return y + 80;
+  }
+
+  matches.forEach((m, i) => {
+    y = drawH2hRow(ctx, m, i, homeTeam, boxX, y, boxW);
+  });
+  return y + 16;
+}
+
+function drawSectionDivider(ctx, y) {
+  ctx.strokeStyle = "#d1d5db";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(PAD, y);
+  ctx.lineTo(PHONE_W - PAD, y);
+  ctx.stroke();
+  return y + 28;
+}
+
+function cropCanvasToY(canvas, y) {
   const finalH = Math.max(Math.ceil(y + 24), 400);
   if (finalH < canvas.height) {
     const cropped = document.createElement("canvas");
     cropped.width = PHONE_W;
     cropped.height = finalH;
     cropped.getContext("2d").drawImage(canvas, 0, 0);
-    return canvasToPngBlob(cropped);
+    return cropped;
   }
-  if (finalH > canvas.height) {
-    // 内容略超出预估时以实际绘制终点为准重画背景不够——直接按当前画布输出
-    return canvasToPngBlob(canvas);
+  return canvas;
+}
+
+/**
+ * 单场综合竖屏图：交手历史 + 双方近10场 + 共同对手对比
+ */
+export async function renderMatchHistoryBundleImage(match, {
+  homeMatches = [],
+  awayMatches = [],
+  h2hMatches = [],
+  commonOpponents = null,
+} = {}) {
+  const home = (homeMatches || []).filter((m) => m.finished).slice(0, 10);
+  const away = (awayMatches || []).filter((m) => m.finished).slice(0, 10);
+  const h2h = (h2hMatches || []).filter((m) => m.finished).slice(0, 10);
+  const commonItems = (commonOpponents?.items || []).slice(0, 5);
+  const windowLabel = commonOpponents?.windowLabel || "近1年";
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.font = `400 26px ${FONT}`;
+
+  let height = 220;
+  height += measureH2hBlock(ctx, h2h) + 24;
+  height += measureRecentBlock(ctx, match.home, home) + 24;
+  height += measureRecentBlock(ctx, match.away, away) + 24;
+  if (commonItems.length) {
+    if (commonOpponents?.summary?.text) {
+      height += wrapLines(ctx, commonOpponents.summary.text, PHONE_W - PAD * 2).length * 36 + 16;
+    }
+    height += measureCommonBlock(ctx, commonItems, match.home, match.away) + 24;
+  }
+  height += 96;
+
+  canvas.width = PHONE_W;
+  canvas.height = Math.ceil(height);
+  fillBackground(ctx, PHONE_W, canvas.height);
+
+  let y = 72;
+  y = drawHeader(ctx, match, "综合战绩", y);
+
+  y = drawH2hBlock(ctx, h2h, match.home, y);
+  y = drawSectionDivider(ctx, y);
+
+  y = drawRecentBlock(ctx, match.home, home, y);
+  y = drawRecentBlock(ctx, match.away, away, y);
+
+  if (commonItems.length) {
+    y = drawSectionDivider(ctx, y);
+    if (commonOpponents?.summary?.text) {
+      ctx.fillStyle = "#4b5563";
+      ctx.font = `400 26px ${FONT}`;
+      for (const line of wrapLines(ctx, commonOpponents.summary.text, PHONE_W - PAD * 2)) {
+        ctx.fillText(line, PAD, y);
+        y += 36;
+      }
+      y += 12;
+    }
+    y = drawCommonBlock(ctx, commonItems, match.home, match.away, y, windowLabel);
   }
 
-  return canvasToPngBlob(canvas);
+  ctx.fillStyle = "#9ca3af";
+  ctx.font = `400 22px ${FONT}`;
+  ctx.fillText("交手 + 近10场 + 共同对手同图 · 仅供娱乐参考", PAD, y + 8);
+  y += 48;
+
+  return canvasToPngBlob(cropCanvasToY(canvas, y));
+}
+
+/** 双方近 10 场竖屏图（同图，每场不同底色；高度随内容） */
+export async function renderRecentFormImage(match, homeMatches, awayMatches) {
+  return renderMatchHistoryBundleImage(match, {
+    homeMatches,
+    awayMatches,
+    h2hMatches: [],
+    commonOpponents: null,
+  });
 }
 
 function measureCommonItem(ctx, it, homeName, awayName, maxW) {
@@ -1075,8 +1212,10 @@ export async function packExportZip({ dayFolders, excelBlob, zipName }) {
     const dayFolder = zip.folder(day.name);
     for (const match of day.matches) {
       const folder = dayFolder.folder(match.folder);
-      if (match.recentPng) folder.file("01_近期10场.png", match.recentPng);
-      if (match.commonPng) folder.file("02_共同对手.png", match.commonPng);
+      if (match.historyPng) folder.file("01_综合战绩.png", match.historyPng);
+      // 兼容旧字段
+      if (!match.historyPng && match.recentPng) folder.file("01_近期10场.png", match.recentPng);
+      if (!match.historyPng && match.commonPng) folder.file("02_共同对手.png", match.commonPng);
     }
   }
   if (excelBlob) zip.file("预测表.xlsx", excelBlob);

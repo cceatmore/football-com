@@ -45,8 +45,7 @@ import {
 } from "./matchHistory.js";
 import { fetchStandingsForMatches, fetchLeagueStandingsByMatch, clearLeagueStandingsCache } from "./leagueStandings.js";
 import {
-  renderRecentFormImage,
-  renderCommonOpponentsImage,
+  renderMatchHistoryBundleImage,
   buildPredictionsWorkbook,
   gradeImportedWorkbook,
   packExportZip,
@@ -323,7 +322,7 @@ function renderExport() {
 
   els.main.innerHTML = `
     <div class="export-page">
-      <p class="export-intro">导出当前可购买场次的竖屏战绩图（近10场 + 共同对手）与预测 Excel。可先改表内预测再导入；核对只认导入文件里的当前内容，猜对的胜负/比分标红。</p>
+      <p class="export-intro">导出当前可购买场次的竖屏综合战绩图（交手历史 + 近10场 + 共同对手）与预测 Excel。可先改表内预测再导入；核对只认导入文件里的当前内容，猜对的胜负/比分标红。</p>
       <div class="export-stat-card">
         <div class="export-stat-value">${matches.length}</div>
         <div class="export-stat-label">可购买场次</div>
@@ -340,7 +339,8 @@ function renderExport() {
 
       <p class="export-status" id="export-status"></p>
       <ul class="export-tips">
-        <li>图片高度随内容；近10场双方同图分色；共同对手最多5个（先近1年，没有再近2年，仍没有则不出该图）</li>
+        <li>每场一张综合图：双方交手历史、双方近10场、共同对手对比（高度随内容）</li>
+        <li>共同对手最多5个（先近1年，没有再近2年；仍没有则该段不画）</li>
         <li>同一天多场会按日期分子文件夹打包 ZIP</li>
         <li>Excel：胜负最多两项、半全场（胜胜/胜负等）、比分随大小球走势；可改内容后再导入</li>
         <li>导入时只按你表里当前的胜负/比分预测核对完赛结果，猜对标红（不依赖导出时的原值）</li>
@@ -425,20 +425,20 @@ async function collectMatchExportData(match, onProgress) {
   analysis = { ...analysis, form };
   const scoreOutlook = buildScoreOutlook(match, form, analysis.consensus?.goals);
 
-  onProgress?.("绘制竖屏图片…");
-  const recentPng = await renderRecentFormImage(match, form.home, form.away);
-  // 两年内仍无共同对手则不输出该图
-  const commonPng = form.commonOpponents
-    ? await renderCommonOpponentsImage(match, form.commonOpponents)
-    : null;
+  onProgress?.("绘制竖屏综合战绩图…");
+  const historyPng = await renderMatchHistoryBundleImage(match, {
+    homeMatches: form.home,
+    awayMatches: form.away,
+    h2hMatches: form.h2h || [],
+    commonOpponents: form.commonOpponents,
+  });
 
   return {
     match,
     form,
     analysis,
     scoreOutlook,
-    recentPng,
-    commonPng,
+    historyPng,
     excelRow: {
       num: match.num || String(match.id),
       league: match.leagueShort || match.league || "",
@@ -482,8 +482,7 @@ async function runContentExport() {
       if (!dayMap.has(dayKey)) dayMap.set(dayKey, { name: dayKey, matches: [] });
       dayMap.get(dayKey).matches.push({
         folder: matchFolderName(match),
-        recentPng: packed.recentPng,
-        commonPng: packed.commonPng,
+        historyPng: packed.historyPng,
       });
     }
 
@@ -780,9 +779,13 @@ async function openMatchDetail(match) {
       fetchTeamHistories(match.id),
       fetchLeagueStandingsByMatch(match.id).catch(() => null),
     ]);
-    const homeMatches = getTeamHistoryList(histories, "home", localHome, match.home, match.id);
-    const awayMatches = getTeamHistoryList(histories, "away", localAway, match.away, match.id);
-    const h2hMatches = getH2hList(histories);
+    const homeMatches = getTeamHistoryList(histories, "home", localHome, match.home, match.id)
+      .filter((m) => m.finished)
+      .slice(0, 10);
+    const awayMatches = getTeamHistoryList(histories, "away", localAway, match.away, match.id)
+      .filter((m) => m.finished)
+      .slice(0, 10);
+    const h2hMatches = getH2hList(histories).filter((m) => m.finished);
     const rankLookup = buildTeamRankLookup(
       standings?.rows || [],
       state.allMatches,
@@ -2209,17 +2212,20 @@ function tempoStyleCardHtml(match, form) {
 
 async function loadPredictionForm(match) {
   const local = state.allMatches || [];
-  const [home, away] = await Promise.all([
+  const [home, away, histories] = await Promise.all([
     fetchTeamRecentForm(match.home, {
       matchId: match.id,
       localMatches: local,
       limit: COMMON_OPPONENT_MATCH_LIMIT,
+      sideHint: "home",
     }),
     fetchTeamRecentForm(match.away, {
       matchId: match.id,
       localMatches: local,
       limit: COMMON_OPPONENT_MATCH_LIMIT,
+      sideHint: "away",
     }),
+    fetchTeamHistories(match.id, COMMON_OPPONENT_MATCH_LIMIT).catch(() => null),
   ]);
   const homeAll = (home || []).filter((m) => m.finished);
   const awayAll = (away || []).filter((m) => m.finished);
@@ -2232,6 +2238,7 @@ async function loadPredictionForm(match) {
     // 比分/主客场分析用更长样本，便于拆出主场/客场场次
     scoreHome: homeAll,
     scoreAway: awayAll,
+    h2h: getH2hList(histories, 10),
     commonOpponents: buildCommonOpponentsAnalysis(match.home, match.away, homeAll, awayAll),
     // 半场风格用近 10 场（与近况条一致），样本更贴合近期状态
     tempoStyle: buildMatchTempoAnalysis(match.home, match.away, homeForm, awayForm),
@@ -2314,6 +2321,7 @@ async function openPredictionDetail(match) {
     form.pending ||
     !form.commonOpponents ||
     !("tempoStyle" in form) ||
+    !("h2h" in form) ||
     !form.scoreHome ||
     !form.scoreAway;
 
@@ -2339,6 +2347,7 @@ async function openPredictionDetail(match) {
             away: [],
             scoreHome: [],
             scoreAway: [],
+            h2h: [],
             commonOpponents: buildCommonOpponentsAnalysis(match.home, match.away, [], []),
             tempoStyle: null,
           };
@@ -2495,6 +2504,13 @@ async function loadStandingsTeamMatches(team, group) {
       bridgeMatchId: findStandingsAnchorMatchId(group),
       localMatches: state.allMatches,
       limit: STANDINGS_RECENT_LIMIT,
+      sideHint: metaMatch
+        ? resolveTeamInMatch(metaMatch, team) === metaMatch.home
+          ? "home"
+          : resolveTeamInMatch(metaMatch, team) === metaMatch.away
+            ? "away"
+            : null
+        : null,
     });
     state.standingsTeamMatches.set(team, (matches || []).slice(0, STANDINGS_RECENT_LIMIT));
   } catch (err) {
