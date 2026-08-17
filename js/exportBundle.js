@@ -1220,7 +1220,7 @@ export async function packExportZip({ dayFolders, excelBlob, zipName }) {
   }
   if (excelBlob) zip.file("预测表.xlsx", excelBlob);
   const blob = await zip.generateAsync({ type: "blob" });
-  downloadBlob(blob, zipName || `竞彩导出_${stamp()}.zip`);
+  downloadBlob(blob, zipName || `${stamp().slice(0, 8)}.zip`);
 }
 
 export function downloadBlob(blob, filename) {

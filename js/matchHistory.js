@@ -157,7 +157,17 @@ export function normalizeUniformHistoryMatch(raw, context = {}) {
   };
 }
 
+/** 体彩战绩接口可用的 sportteryMatchId 号段 */
+export function isSportteryMatchId(id) {
+  const n = Number(id);
+  return Number.isFinite(n) && n >= 2000000 && n < 2100000;
+}
+
 export async function fetchTeamHistories(matchId, termLimits = RECENT_MATCH_LIMIT) {
+  if (!isSportteryMatchId(matchId)) {
+    return { termLimits, home: [], away: [], h2h: [] };
+  }
+
   const cached = cache.get(matchId);
   if (cached && (cached.termLimits || RECENT_MATCH_LIMIT) >= termLimits) return cached;
 
@@ -173,7 +183,10 @@ export async function fetchTeamHistories(matchId, termLimits = RECENT_MATCH_LIMI
     h2h: (h2h?.matchList || []).map((m) => normalizeUniformHistoryMatch(m)),
   };
 
-  cache.set(matchId, payload);
+  // 失败/空结果不缓存，避免偶发网络问题把近况永久置空
+  if (payload.home.length || payload.away.length || payload.h2h.length) {
+    cache.set(matchId, payload);
+  }
   return payload;
 }
 
@@ -215,28 +228,93 @@ function historiesSideForTeam(histories, team) {
   return null;
 }
 
-function findBridgeMatchId(histories, team) {
-  const pools = [...(histories?.home || []), ...(histories?.away || [])];
-  for (const m of pools) {
+function findBridgeMatchIds(histories, team) {
+  const ids = [];
+  const seen = new Set();
+  for (const m of [...(histories?.home || []), ...(histories?.away || [])]) {
     const resolved = resolveTeamInMatch(m, team);
     if (resolved !== m.home && resolved !== m.away) continue;
     const id = Number(m.sportteryMatchId || m.id);
-    // 仅使用有效竞彩场次号；内部 matchId 调 getMatchResultV1 常无数据
-    if (Number.isFinite(id) && id >= 2000000 && id < 2100000) return id;
+    if (!isSportteryMatchId(id) || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
   }
+  return ids;
+}
+
+function findBridgeMatchId(histories, team) {
+  return findBridgeMatchIds(histories, team)[0] ?? null;
+}
+
+/** 从本地赛程/历史里找该队的其它竞彩场次，优先完赛，用作战绩桥接 */
+export function findLocalBridgeMatchIds(team, allMatches = [], excludeId = null) {
+  const exclude = excludeId != null ? String(excludeId) : null;
+  const candidates = [];
+  for (const m of allMatches || []) {
+    if (m?.id == null) continue;
+    if (exclude != null && String(m.id) === exclude) continue;
+    const id = Number(m.id);
+    if (!isSportteryMatchId(id)) continue;
+    const resolved = resolveTeamInMatch(m, team);
+    if (resolved !== m.home && resolved !== m.away) continue;
+    candidates.push(m);
+  }
+  candidates.sort((a, b) => {
+    const af = a.finished && a.homeScore != null ? 1 : 0;
+    const bf = b.finished && b.homeScore != null ? 1 : 0;
+    if (bf !== af) return bf - af;
+    return compareMatchTimeDesc(a, b);
+  });
+  return candidates.map((m) => Number(m.id));
+}
+
+export function findLocalBridgeMatchId(team, allMatches = [], excludeId = null) {
+  return findLocalBridgeMatchIds(team, allMatches, excludeId)[0] ?? null;
+}
+
+function findOpponentName(team, matchId, localMatches = []) {
+  if (matchId == null) return null;
+  const m = (localMatches || []).find((x) => x?.id != null && String(x.id) === String(matchId));
+  if (!m) return null;
+  const resolved = resolveTeamInMatch(m, team);
+  if (resolved === m.home) return m.away;
+  if (resolved === m.away) return m.home;
   return null;
 }
 
 function preferFinishedMatches(list, limit) {
   const all = list || [];
-  const finished = all.filter((m) => m?.finished);
-  const picked = finished.length ? finished : all;
-  return picked.slice(0, limit);
+  const finished = all.filter((m) => m?.finished && m.homeScore != null && m.awayScore != null);
+  const picked = finished.length ? finished : all.filter((m) => m?.finished);
+  if (picked.length) return picked.slice(0, limit);
+  return all.slice(0, limit);
+}
+
+function mergeMatchLists(...lists) {
+  const map = new Map();
+  for (const list of lists) {
+    for (const m of list || []) {
+      if (m?.id == null) continue;
+      const key = String(m.id);
+      const prev = map.get(key);
+      map.set(key, prev ? { ...prev, ...m } : m);
+    }
+  }
+  return [...map.values()].sort(compareMatchTimeDesc);
+}
+
+/** 当侧别不确定时，从主客两侧列表里筛出确实包含该队的场次 */
+function collectMatchesInvolvingTeam(histories, team, local, limit) {
+  const remote = [...(histories?.home || []), ...(histories?.away || [])].filter((m) => {
+    const resolved = resolveTeamInMatch(m, team);
+    return resolved === m.home || resolved === m.away;
+  });
+  return mergeTeamMatches(local, remote, team, null).slice(0, limit);
 }
 
 /**
  * 拉取球队近期对局：优先用相关场次 matchId，必要时经桥接场次再取。
- * @param {string} sideHint 已知主/客身份时传入 "home"|"away"，避免全称/简称对不上导致取错侧或取空
+ * @param {string} sideHint 仅对「当前这场」的 matchId 有效；桥接场次会改由队名推断主客侧
  */
 export async function fetchTeamRecentForm(
   team,
@@ -249,41 +327,104 @@ export async function fetchTeamRecentForm(
   } = {}
 ) {
   const local = collectLocalTeamMatches(localMatches, team, Math.max(limit, RECENT_MATCH_LIMIT));
+  const minUseful = Math.min(5, limit);
+  let best = preferFinishedMatches(local, limit);
 
-  const tryMatchId = async (id) => {
-    if (id == null) return null;
+  const takeIfBetter = (matches) => {
+    const finished = preferFinishedMatches(matches, limit);
+    if (finished.length > best.length) best = finished;
+    return finished;
+  };
+
+  const tryMatchId = async (id, hint = null) => {
+    if (!isSportteryMatchId(id)) return null;
     const histories = await fetchTeamHistories(id, Math.max(limit, RECENT_MATCH_LIMIT));
-    const side = sideHint || historiesSideForTeam(histories, team);
-    if (!side) return { histories, matches: null };
-    // 多取一些再筛完赛，避免未赛/无比分场次占满窗口
-    const raw = getTeamHistoryList(histories, side, local, team, null, Math.max(limit * 2, 20));
+    const side = hint || historiesSideForTeam(histories, team);
+    let matches = [];
+    if (side) {
+      matches = getTeamHistoryList(histories, side, local, team, null, Math.max(limit * 2, 20));
+    }
+    // 侧别为空或该侧几乎没有完赛时，两侧扫描兜底
+    const finishedCount = (matches || []).filter((m) => m?.finished && m.homeScore != null).length;
+    if (!matches?.length || finishedCount < minUseful) {
+      const scanned = collectMatchesInvolvingTeam(histories, team, local, Math.max(limit * 2, 20));
+      if ((scanned || []).filter((m) => m?.finished && m.homeScore != null).length > finishedCount) {
+        matches = scanned;
+      } else if (!matches?.length && scanned?.length) {
+        matches = scanned;
+      }
+    }
     return {
       histories,
-      matches: preferFinishedMatches(raw, limit),
+      matches: preferFinishedMatches(matches, limit),
     };
   };
 
-  let result = await tryMatchId(matchId);
-  if (result?.matches?.length) return result.matches;
+  const tried = new Set();
+  const queue = [];
+  const enqueue = (id) => {
+    if (id == null || tried.has(String(id)) || !isSportteryMatchId(id)) return;
+    if (queue.some((x) => String(x) === String(id))) return;
+    queue.push(id);
+  };
 
-  if (bridgeMatchId && bridgeMatchId !== matchId) {
-    result = await tryMatchId(bridgeMatchId);
-    if (result?.matches?.length) return result.matches;
+  // 1) 当前场次：先带 sideHint，再去掉 sideHint（防止主客与接口不一致）
+  if (isSportteryMatchId(matchId)) {
+    enqueue(matchId);
+  }
 
-    const bridgedId = findBridgeMatchId(result?.histories, team);
-    if (bridgedId && bridgedId !== bridgeMatchId && bridgedId !== matchId) {
-      const bridged = await tryMatchId(bridgedId);
-      if (bridged?.matches?.length) return bridged.matches;
+  // 2) 调用方 / 本地 / 历史中的桥接场次（桥接时不再沿用原场 sideHint）
+  enqueue(bridgeMatchId);
+  for (const id of findLocalBridgeMatchIds(team, localMatches, matchId)) enqueue(id);
+
+  let firstHistories = null;
+  let usedSideHintFor = matchId != null ? String(matchId) : null;
+
+  while (queue.length && best.length < limit) {
+    const id = queue.shift();
+    if (tried.has(String(id))) continue;
+    tried.add(String(id));
+
+    const hint = usedSideHintFor && String(id) === usedSideHintFor ? sideHint : null;
+    let result = await tryMatchId(id, hint);
+    if (result?.matches?.length) takeIfBetter(result.matches);
+    if (!firstHistories && result?.histories) firstHistories = result.histories;
+
+    // 当前场次若带 hint 仍不够，再试一次不带 hint
+    if (hint && best.length < minUseful) {
+      result = await tryMatchId(id, null);
+      if (result?.matches?.length) takeIfBetter(result.matches);
     }
-  } else if (result?.histories) {
-    const bridgedId = findBridgeMatchId(result.histories, team);
-    if (bridgedId && bridgedId !== matchId) {
-      const bridged = await tryMatchId(bridgedId);
-      if (bridged?.matches?.length) return bridged.matches;
+
+    for (const nextId of findBridgeMatchIds(result?.histories, team)) enqueue(nextId);
+    if (best.length >= limit) break;
+  }
+
+  // 3) 仍不足：经本场对手的战绩列表反查本队可用场次号
+  if (best.length < minUseful) {
+    const opponent = findOpponentName(team, matchId, localMatches);
+    if (opponent) {
+      for (const oppId of findLocalBridgeMatchIds(opponent, localMatches, matchId)) {
+        if (tried.has(String(oppId))) continue;
+        tried.add(String(oppId));
+        const oppHistories = await fetchTeamHistories(oppId, Math.max(limit, RECENT_MATCH_LIMIT));
+        for (const viaId of findBridgeMatchIds(oppHistories, team)) {
+          if (tried.has(String(viaId))) continue;
+          tried.add(String(viaId));
+          const via = await tryMatchId(viaId, null);
+          if (via?.matches?.length) takeIfBetter(via.matches);
+          if (best.length >= limit) break;
+        }
+        if (best.length >= minUseful) break;
+      }
     }
   }
 
-  return preferFinishedMatches(local, limit);
+  if (best.length < minUseful && firstHistories) {
+    takeIfBetter(collectMatchesInvolvingTeam(firstHistories, team, local, Math.max(limit * 2, 20)));
+  }
+
+  return best.slice(0, limit);
 }
 
 export function getH2hList(histories, limit = H2H_MATCH_LIMIT) {
@@ -304,6 +445,13 @@ function compareMatchTimeDesc(a, b) {
   return matchTimeKey(b) - matchTimeKey(a);
 }
 
+function preferNum(...vals) {
+  for (const v of vals) {
+    if (v != null && v !== "" && !Number.isNaN(Number(v))) return typeof v === "number" ? v : Number(v);
+  }
+  return null;
+}
+
 function mergeTeamMatches(localMatches, remoteMatches, team, excludeMatchId) {
   const map = new Map();
   for (const m of remoteMatches) {
@@ -319,18 +467,25 @@ function mergeTeamMatches(localMatches, remoteMatches, team, excludeMatchId) {
       map.set(String(m.id), m);
       continue;
     }
+    // 本地未完赛常带 homeScore:null，不能覆盖远程已有比分
+    const homeScore = preferNum(prev.homeScore, m.homeScore);
+    const awayScore = preferNum(prev.awayScore, m.awayScore);
     map.set(String(m.id), {
       ...prev,
       ...m,
-      homeHtScore: m.homeHtScore ?? prev.homeHtScore ?? null,
-      awayHtScore: m.awayHtScore ?? prev.awayHtScore ?? null,
-      homeEtScore: m.homeEtScore ?? prev.homeEtScore ?? null,
-      awayEtScore: m.awayEtScore ?? prev.awayEtScore ?? null,
-      homePenScore: m.homePenScore ?? prev.homePenScore ?? null,
-      awayPenScore: m.awayPenScore ?? prev.awayPenScore ?? null,
+      homeScore,
+      awayScore,
+      homeHtScore: preferNum(prev.homeHtScore, m.homeHtScore),
+      awayHtScore: preferNum(prev.awayHtScore, m.awayHtScore),
+      homeEtScore: preferNum(prev.homeEtScore, m.homeEtScore),
+      awayEtScore: preferNum(prev.awayEtScore, m.awayEtScore),
+      homePenScore: preferNum(prev.homePenScore, m.homePenScore),
+      awayPenScore: preferNum(prev.awayPenScore, m.awayPenScore),
+      finished: Boolean(prev.finished || m.finished || (homeScore != null && awayScore != null)),
       teamMatchResult: m.teamMatchResult || prev.teamMatchResult || "",
       winningTeam: m.winningTeam || prev.winningTeam || "",
       time: m.time || prev.time || "",
+      sportteryMatchId: preferNum(prev.sportteryMatchId, m.sportteryMatchId) || prev.sportteryMatchId || m.sportteryMatchId || null,
     });
   }
   return [...map.values()].sort(compareMatchTimeDesc);
