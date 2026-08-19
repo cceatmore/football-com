@@ -1,4 +1,4 @@
-import { fetchLeagueStandingsByMatch } from "./leagueStandings.js";
+import { fetchLeagueStandingsByMatch, applyTableRanksToMatch } from "./leagueStandings.js";
 
 const UNIFORM_BASE = "https://webapi.sporttery.cn/gateway/uniform/football";
 const FETCH_HEADERS = {
@@ -1526,6 +1526,9 @@ export async function fetchAndAnalyzeMatch(match, options = {}) {
   // 机构预测 + 官方伤停 + 积分榜并行
   const [intel, webFull, standings] = await Promise.all([intelP, webP, standingsP]);
   web = webFull;
+  if (standings?.matchTables?.length) {
+    applyTableRanksToMatch(match, standings.matchTables, standings.leagueName);
+  }
   stakes = buildMatchStakes(match, standings?.rows || null);
   analysis = buildAnalysisPayload(match, web, buildInjuryAnalysis(match, intel, null), {
     complete: false,

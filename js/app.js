@@ -12,7 +12,7 @@ import {
   formatNextUpdateLabel,
   beijingDateKey,
 } from "./data.js";
-import { computeAllStandings, getTeamGroupRank } from "./standings.js";
+import { computeAllStandings, mergeStandingsWithToday, getTeamGroupRank } from "./standings.js";
 import { leagueBadgeHtml, teamLabel, isRealTeam, formatRank, flagHtml } from "./teams.js";
 import {
   fetchAndAnalyzeMatch,
@@ -45,7 +45,13 @@ import {
   buildCommonOpponentsAnalysis,
   COMMON_OPPONENT_MATCH_LIMIT,
 } from "./matchHistory.js";
-import { fetchStandingsForMatches, fetchLeagueStandingsByMatch, clearLeagueStandingsCache } from "./leagueStandings.js";
+import {
+  fetchStandingsForMatches,
+  fetchLeagueStandingsByMatch,
+  clearLeagueStandingsCache,
+  applyTableRanksToMatch,
+  enrichMatchesWithTableRanks,
+} from "./leagueStandings.js";
 import {
   renderMatchHistoryBundleImage,
   buildPredictionsWorkbook,
@@ -149,6 +155,18 @@ function applyData(data) {
   state.standingsTeamMatches = new Map();
   state.standingsTeamLoading = null;
   state.standingsExpandedTeam = null;
+  queueCupRankEnrichment();
+}
+
+function queueCupRankEnrichment() {
+  const lists = [state.matches, state.allMatches, state.history];
+  enrichMatchesWithTableRanks(...lists)
+    .then((changed) => {
+      if (changed) render();
+    })
+    .catch(() => {
+      /* 小组排名补全失败时保留无排名，避免再显示杯赛 1/2 配对标签 */
+    });
 }
 
 function applyFetchedData(data, { notify = false } = {}) {
@@ -1056,6 +1074,9 @@ async function openMatchDetail(match) {
       fetchTeamHistories(match.id),
       fetchLeagueStandingsByMatch(match.id).catch(() => null),
     ]);
+    if (standings?.matchTables?.length) {
+      applyTableRanksToMatch(match, standings.matchTables, standings.leagueName);
+    }
     const homeMatches = getTeamHistoryList(histories, "home", localHome, match.home, match.id)
       .filter((m) => m.finished)
       .slice(0, 10);
@@ -1109,12 +1130,7 @@ async function openMatchDetail(match) {
 }
 
 function getTodayStandingsGroups() {
-  if (state.standingsGroups?.length) return state.standingsGroups;
-  const groups = computeAllStandings(state.allMatches, state.matches);
-  const todayGroups = new Set(state.matches.map((m) => m.group).filter(Boolean));
-  if (todayGroups.size === 0) return groups;
-  const filtered = groups.filter((g) => todayGroups.has(g.group));
-  return filtered.length ? filtered : groups;
+  return mergeStandingsWithToday(state.standingsGroups || [], state.matches, state.allMatches);
 }
 
 function ensureStandingsLeagueTab(groups) {
@@ -1236,10 +1252,12 @@ function predictionCardHtml(m) {
     ? `<span class="prediction-badge prediction-badge--injury">${injuryNote}</span>`
     : "";
 
+  const numHtml = m.num ? `<span class="match-num">${m.num}${m.single ? " · 单关" : ""}</span>` : "";
+
   return `
     <article class="match-card prediction-card" data-match-id="${m.id}">
       ${matchCardHtml(m, { asInner: true, hideMeta: true, showRank: true })}
-      <div class="prediction-card-footer">${badge}${injuryBadge}</div>
+      <div class="prediction-card-footer">${numHtml}<span class="prediction-card-footer-badges">${badge}${injuryBadge}</span></div>
     </article>`;
 }
 
@@ -2823,15 +2841,26 @@ function bindStandingsRows(container) {
   });
 }
 
-function standingsGroupHtml({ group, groupLabel, mode, rows }, opts = {}) {
+function standingsGroupHtml({ group, groupLabel, mode, rows, note }, opts = {}) {
   const isOfficial = mode === "official";
   const isLeague = mode === "league";
+  const isFixture = mode === "fixture";
   const header = opts.hideHeader
-    ? `<div class="group-header group-header--compact">${isOfficial ? "官方排名" : isLeague ? "官方积分榜" : "赛果统计"}</div>`
-    : `<div class="group-header">${groupLabel || group}${isOfficial ? " · 官方排名" : isLeague ? " · 官方积分榜" : ""}</div>`;
+    ? `<div class="group-header group-header--compact">${isOfficial ? "官方排名" : isLeague ? "官方积分榜" : isFixture ? "参赛球队" : "赛果统计"}</div>`
+    : `<div class="group-header">${groupLabel || group}${isOfficial ? " · 官方排名" : isLeague ? " · 官方积分榜" : isFixture ? " · 参赛球队" : ""}</div>`;
+  const noteHtml = note ? `<p class="standings-note">${note}</p>` : "";
+  if (!rows?.length) {
+    return `
+    <div class="group-card">
+      ${header}
+      ${noteHtml}
+      <p class="standings-empty">暂无积分榜数据</p>
+    </div>`;
+  }
   return `
     <div class="group-card">
       ${header}
+      ${noteHtml}
       <table class="standings-table">
         <thead>
           <tr>

@@ -41,6 +41,23 @@ function parseRank(rankStr) {
   return { league: m[1], rank: parseInt(m[2], 10) };
 }
 
+/** 杯赛/洲际赛事：开售里的 [解放者杯1]/[解放者杯2] 是对阵标签，不是积分榜名次 */
+export function isCupLikeLeague(matchOrLeague) {
+  const hay =
+    typeof matchOrLeague === "string"
+      ? matchOrLeague
+      : `${matchOrLeague?.league || ""} ${matchOrLeague?.leagueShort || ""} ${matchOrLeague?.group || ""} ${matchOrLeague?.groupLabel || ""} ${matchOrLeague?.rankLeague || ""}`;
+  return /杯|欧冠|欧联|亚冠|协会杯|超级杯|冠军联赛|资格赛|knockout|copa|libertadores|champions/i.test(hay);
+}
+
+function isPlaceholderCupPairRank(homeInfo, awayInfo, leagueHay) {
+  if (!isCupLikeLeague(leagueHay)) return false;
+  const hr = homeInfo?.rank;
+  const ar = awayInfo?.rank;
+  if (hr == null || ar == null) return false;
+  return Math.min(hr, ar) === 1 && Math.max(hr, ar) === 2;
+}
+
 export function parseMatchTime(dateStr, timeStr) {
   if (!dateStr || !timeStr) {
     return {
@@ -84,6 +101,8 @@ export function formatBeijing(date) {
 function normalizeSelling(raw) {
   const homeRankInfo = parseRank(raw.homeRank);
   const awayRankInfo = parseRank(raw.awayRank);
+  const leagueHay = `${raw.leagueAllName || ""} ${raw.leagueAbbName || ""}`;
+  const cupPair = isPlaceholderCupPairRank(homeRankInfo, awayRankInfo, leagueHay);
   const timeInfo = parseMatchTime(raw.matchDate, raw.matchTime);
   const hhad = raw.hhad || {};
   const had = raw.had || {};
@@ -102,9 +121,9 @@ function normalizeSelling(raw) {
     businessDate: raw.businessDate,
     home: raw.homeTeamAllName || raw.homeTeamAbbName,
     away: raw.awayTeamAllName || raw.awayTeamAbbName,
-    homeRank: homeRankInfo.rank,
-    awayRank: awayRankInfo.rank,
-    rankLeague: homeRankInfo.league || awayRankInfo.league,
+    homeRank: cupPair ? null : homeRankInfo.rank,
+    awayRank: cupPair ? null : awayRankInfo.rank,
+    rankLeague: cupPair ? raw.leagueAbbName || "" : homeRankInfo.league || awayRankInfo.league,
     homeScore: null,
     awayScore: null,
     homeHtScore: null,

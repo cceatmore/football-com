@@ -107,6 +107,60 @@ export function computeLeagueRankStandings(currentMatches) {
     .sort((a, b) => a.group.localeCompare(b.group, "zh-CN"));
 }
 
+function fixtureTeamsFromMatches(matches, group) {
+  const teams = [];
+  const seen = new Set();
+  for (const m of matches || []) {
+    if (group && m.group !== group) continue;
+    for (const team of [m.home, m.away]) {
+      if (!isRealTeam(team) || seen.has(team)) continue;
+      seen.add(team);
+      teams.push(team);
+    }
+  }
+  return teams;
+}
+
+/** 当天有赛的联赛都要出 Tab：官方榜优先，否则本地赛果，再否则列出参赛球队 */
+export function mergeStandingsWithToday(remoteGroups = [], currentMatches = [], allMatches = []) {
+  const byGroup = new Map((remoteGroups || []).map((g) => [g.group, g]));
+  const todayGroups = [...new Set((currentMatches || []).map((m) => m.group).filter(Boolean))];
+  const keys = todayGroups.length ? todayGroups : [...byGroup.keys()];
+
+  return keys
+    .map((group) => {
+      const remote = byGroup.get(group);
+      if (remote?.rows?.length) return remote;
+
+      const sample = (currentMatches || []).find((m) => m.group === group);
+      const label = remote?.groupLabel || sample?.groupLabel || sample?.league || group;
+      const computed = computeStandings(allMatches, group).filter((r) => r.mp > 0);
+      if (computed.length) {
+        return {
+          group,
+          groupLabel: label,
+          mode: "computed",
+          anchorMatchId: remote?.anchorMatchId || sample?.id,
+          rows: computed,
+        };
+      }
+
+      const teams = fixtureTeamsFromMatches(currentMatches, group);
+      return {
+        group,
+        groupLabel: label,
+        mode: "fixture",
+        note: "资格赛/淘汰赛阶段官方暂无联赛积分榜，下列为今日参赛球队",
+        anchorMatchId: remote?.anchorMatchId || sample?.id,
+        rows: teams.map((team, i) => ({
+          ...emptyRecord(team),
+          rank: i + 1,
+        })),
+      };
+    })
+    .sort((a, b) => String(a.group).localeCompare(String(b.group), "zh-CN"));
+}
+
 export function computeAllStandings(allMatches, currentMatches = []) {
   const fromResults = [
     ...new Set(allMatches.filter((m) => m.group && m.finished).map((m) => m.group)),

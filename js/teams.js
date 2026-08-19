@@ -49,7 +49,9 @@ export function flagHtml(name, size = 24, match = null) {
 
 export function formatRank(rank, league) {
   if (rank == null) return null;
-  return league ? `${league}第 ${rank} 名` : `第 ${rank} 名`;
+  const label = String(league || "").trim();
+  if (/组$/.test(label)) return `${label}第 ${rank}`;
+  return label ? `${label}第 ${rank} 名` : `第 ${rank} 名`;
 }
 
 export function getFifaRank() {
