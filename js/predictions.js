@@ -1,4 +1,5 @@
 import { fetchLeagueStandingsByMatch, applyTableRanksToMatch } from "./leagueStandings.js";
+import { teamResultLabel, resolveTeamInMatch } from "./matchHistory.js";
 
 const UNIFORM_BASE = "https://webapi.sporttery.cn/gateway/uniform/football";
 const FETCH_HEADERS = {
@@ -157,7 +158,7 @@ const PRIORITY_TIP_SITES = [
 
 const cache = new Map();
 /** 预测结果结构版本；变更后自动丢弃旧缓存（避免串场摘要残留） */
-export const ANALYSIS_SCHEMA = 11;
+export const ANALYSIS_SCHEMA = 12;
 
 /** 赔率/资讯站，不做预测摘要 */
 const BLOCKED_HOSTS = [
@@ -327,15 +328,186 @@ function pct(n) {
   return `${Math.round(n * 100)}%`;
 }
 
-/** 体彩胜平负赔率 → 去水后隐含概率 */
-function oddsToImpliedProbs(odds) {
-  if (!odds?.h || !odds?.d || !odds?.a) return null;
-  const ih = 1 / Number(odds.h);
-  const id = 1 / Number(odds.d);
-  const ia = 1 / Number(odds.a);
-  if (![ih, id, ia].every((n) => Number.isFinite(n) && n > 0)) return null;
-  const sum = ih + id + ia;
-  return { home: ih / sum, draw: id / sum, away: ia / sum };
+function clampLean(n, lo, hi) {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function softmax3(home, draw, away) {
+  const m = Math.max(home, draw, away);
+  const eh = Math.exp(home - m);
+  const ed = Math.exp(draw - m);
+  const ea = Math.exp(away - m);
+  const sum = eh + ed + ea || 1;
+  return { home: eh / sum, draw: ed / sum, away: ea / sum };
+}
+
+function formSideStrength(matches, team, venueHint) {
+  const list = (matches || []).filter((m) => m?.finished).slice(0, 10);
+  if (!list.length) return { score: null, n: 0, ppg: 0, gd: 0 };
+  let pts = 0;
+  let gd = 0;
+  let weightSum = 0;
+  list.forEach((m, i) => {
+    const recency = 1.25 - i * 0.05;
+    const result = teamResultLabel(m, team);
+    const p = result === "胜" ? 3 : result === "平" ? 1 : 0;
+    const resolved = resolveTeamInMatch(m, team);
+    const isHome = resolved === m.home;
+    const venueW = venueHint === "home" && isHome ? 1.2 : venueHint === "away" && !isHome ? 1.2 : 1;
+    const wt = Math.max(0.6, recency) * venueW;
+    pts += p * wt;
+    if (m.homeScore != null && m.awayScore != null && resolved) {
+      const gf = isHome ? Number(m.homeScore) : Number(m.awayScore);
+      const ga = isHome ? Number(m.awayScore) : Number(m.homeScore);
+      if (Number.isFinite(gf) && Number.isFinite(ga)) gd += (gf - ga) * wt;
+    }
+    weightSum += wt;
+  });
+  const ppg = weightSum ? pts / weightSum : 0;
+  return { score: ppg / 3, n: list.length, ppg, gd: weightSum ? gd / weightSum : 0 };
+}
+
+function injuryDrag(side) {
+  if (!side) return 0;
+  const weights = { 门将: 1.35, 后卫: 0.7, 中场: 0.85, 前锋: 1.1 };
+  let drag = 0;
+  for (const [pos, n] of Object.entries(side.byPos || {})) {
+    drag += Number(n || 0) * (weights[pos] || 0.8);
+  }
+  if (!drag && side.total) drag = Number(side.total) * 0.8;
+  return Math.min(2.8, drag);
+}
+
+function stakeUrgency(row, rules, isCup) {
+  if (isCup) return 0.85;
+  const zone = zoneLabelForRank(row?.rank, rules);
+  if (zone === "争冠区" || zone === "降级区" || zone === "降级附加赛区") return 1;
+  if (/欧冠|欧战|解放|南美/.test(zone)) return 0.65;
+  if (rules?.relegateFrom && row?.rank != null && row.rank >= rules.relegateFrom - 2) return 0.8;
+  return 0.28;
+}
+
+function conditionAdjust(conditions) {
+  if (!conditions) {
+    return { home: 0, draw: 0, away: 0, reasons: [] };
+  }
+  let home = 0;
+  let draw = 0;
+  let away = 0;
+  const reasons = [];
+  const temp = conditions.temp;
+  if (Number.isFinite(temp)) {
+    reasons.push(`气温 ${Math.round(temp)}℃`);
+    if (temp <= 4 || temp >= 33) {
+      away -= 0.12;
+      draw += 0.08;
+      reasons.push(temp <= 4 ? "低温不利于客队适应" : "高温消耗大，客队略吃亏");
+    } else if (temp >= 12 && temp <= 24) {
+      home += 0.03;
+    }
+  }
+  const rain = conditions.precipitation;
+  if (Number.isFinite(rain) && rain >= 3) {
+    draw += 0.1;
+    home -= 0.04;
+    away -= 0.02;
+    reasons.push(rain >= 12 ? "降水偏多，草坪偏湿滑" : "有降水，草坪偏湿");
+  } else if (Number.isFinite(rain)) {
+    reasons.push("草坪偏干");
+  } else if (conditions.pitchNote) {
+    reasons.push(conditions.pitchNote);
+  }
+  return { home, draw, away, reasons };
+}
+
+/**
+ * 综合近况 / 伤停 / 关键程度 / 天气场地，算出胜平负倾向。不使用盘口赔率。
+ */
+export function computeMatchLean(match, { form = null, injury = null, standingRows = null, conditions = null } = {}) {
+  const reasons = [];
+  const leagueKey = match.leagueShort || match.group || "";
+  const rules = LEAGUE_STAKE_RULES[leagueKey] || null;
+  const isCup = isCupCompetition(match);
+  const homeForm = formSideStrength(form?.scoreHome || form?.home, match.home, "home");
+  const awayForm = formSideStrength(form?.scoreAway || form?.away, match.away, "away");
+  const homeRow =
+    findStandingRow(standingRows, match.home) ||
+    (match.homeRank != null ? { team: match.home, rank: match.homeRank, pts: null } : null);
+  const awayRow =
+    findStandingRow(standingRows, match.away) ||
+    (match.awayRank != null ? { team: match.away, rank: match.awayRank, pts: null } : null);
+
+  let home = 0.16;
+  let draw = 0.08;
+  let away = 0;
+
+  if (homeForm.score != null && awayForm.score != null) {
+    home += homeForm.score * 1.15;
+    away += awayForm.score * 1.15;
+    const gap = homeForm.score - awayForm.score;
+    if (Math.abs(gap) < 0.08) {
+      draw += 0.16;
+      reasons.push("近10场状态接近");
+    } else if (gap > 0) {
+      reasons.push(`${match.home}近况更好（近${homeForm.n}场约${homeForm.ppg.toFixed(1)}分/场）`);
+    } else {
+      reasons.push(`${match.away}近况更好（近${awayForm.n}场约${awayForm.ppg.toFixed(1)}分/场）`);
+    }
+    home += clampLean(homeForm.gd - awayForm.gd, -2, 2) * 0.06;
+  } else if (homeForm.score != null) {
+    home += homeForm.score * 0.7;
+    reasons.push(`已计入${match.home}近${homeForm.n}场`);
+  } else if (awayForm.score != null) {
+    away += awayForm.score * 0.7;
+    reasons.push(`已计入${match.away}近${awayForm.n}场`);
+  } else {
+    reasons.push("近况样本不足");
+  }
+
+  const homeDrag = injuryDrag(injury?.home);
+  const awayDrag = injuryDrag(injury?.away);
+  if (homeDrag || awayDrag) {
+    home -= homeDrag * 0.12;
+    away -= awayDrag * 0.12;
+    if (awayDrag - homeDrag >= 0.6) reasons.push(`${match.away}主力伤停更重`);
+    else if (homeDrag - awayDrag >= 0.6) reasons.push(`${match.home}主力伤停更重`);
+    else reasons.push("双方伤停影响接近");
+  }
+
+  const homeUrge = stakeUrgency(homeRow, rules, isCup);
+  const awayUrge = stakeUrgency(awayRow, rules, isCup);
+  home += homeUrge * 0.18;
+  away += awayUrge * 0.18;
+  if (isCup) {
+    reasons.push("杯赛/资格赛，本场更关键");
+  } else if (homeUrge >= 0.8 && awayUrge < 0.5) {
+    reasons.push(`${match.home}本场积分意义更大`);
+  } else if (awayUrge >= 0.8 && homeUrge < 0.5) {
+    reasons.push(`${match.away}本场积分意义更大`);
+  } else if (homeUrge >= 0.8 && awayUrge >= 0.8) {
+    reasons.push("双方都处在关键积分区");
+  }
+
+  if (homeRow?.rank != null && awayRow?.rank != null) {
+    const diff = (awayRow.rank - homeRow.rank) / 18;
+    home += clampLean(diff, -0.8, 0.8) * 0.22;
+    away -= clampLean(diff, -0.8, 0.8) * 0.12;
+  }
+
+  const weather = conditionAdjust(conditions);
+  home += weather.home;
+  draw += weather.draw;
+  away += weather.away;
+  reasons.push(...weather.reasons);
+
+  const probs = softmax3(home, draw, away);
+  return {
+    probs,
+    reasons: reasons.filter(Boolean).slice(0, 5),
+    usedOdds: false,
+    form: { home: homeForm, away: awayForm },
+    conditions,
+  };
 }
 
 function isCupCompetition(match) {
@@ -445,11 +617,17 @@ function teamAcceptsDraw(row, rules, isCup, probs, sideKey) {
 /**
  * 赛果影响：哪边更被看好、赢/平/输意味着什么、谁更能接受平局
  */
-export function buildMatchStakes(match, standingRows = null) {
+export function buildMatchStakes(match, standingRows = null, extras = {}) {
   const leagueKey = match.leagueShort || match.group || "";
   const rules = LEAGUE_STAKE_RULES[leagueKey] || null;
   const isCup = isCupCompetition(match);
-  const probs = oddsToImpliedProbs(match.odds);
+  const lean = computeMatchLean(match, {
+    form: extras.form || null,
+    injury: extras.injury || null,
+    standingRows,
+    conditions: extras.conditions || null,
+  });
+  const probs = lean.probs;
   const pick = probs ? pickOutcome(probs) : null;
 
   const homeRow =
@@ -463,15 +641,9 @@ export function buildMatchStakes(match, standingRows = null) {
     pick?.key === "home" ? match.home : pick?.key === "away" ? match.away : pick?.key === "draw" ? null : null;
   const favoredLabel = pick
     ? pick.key === "draw"
-      ? "双方实力接近，平局概率突出"
-      : `更看好 ${favoredTeam}（${pick.label}约 ${pct(pick.prob)}）`
-    : match.homeRank != null && match.awayRank != null
-      ? match.homeRank < match.awayRank
-        ? `排名更看好主队 ${match.home}（第 ${match.homeRank} vs 第 ${match.awayRank}）`
-        : match.awayRank < match.homeRank
-          ? `排名更看好客队 ${match.away}（第 ${match.awayRank} vs 第 ${match.homeRank}）`
-          : "双方排名接近"
-      : "暂无明确市场倾向";
+      ? `双方接近，平局可能更高（平约 ${pct(pick.prob)}）`
+      : `综合更看好 ${favoredTeam}（${pick.label}约 ${pct(pick.prob)}）`
+    : "样本不足，倾向待定";
 
   const homeWin = describeLeagueOutcome(match.home, "主", "win", homeRow, awayRow, rules, isCup);
   const homeDraw = describeLeagueOutcome(match.home, "主", "draw", homeRow, awayRow, rules, isCup);
@@ -505,8 +677,10 @@ export function buildMatchStakes(match, standingRows = null) {
           team: favoredTeam,
           prob: pick.prob,
           text: favoredLabel,
+          reasons: lean.reasons,
         }
       : null,
+    leanReasons: lean.reasons,
     home: {
       team: match.home,
       rank: homeRow?.rank ?? null,
@@ -527,7 +701,7 @@ export function buildMatchStakes(match, standingRows = null) {
       acceptDraw: awayAccept.accept,
       acceptDrawNote: awayAccept.note,
     },
-    bullets,
+    bullets: [...bullets, ...(lean.reasons || [])],
     scenarios: [
       { result: "主胜", home: homeWin, away: awayLose },
       { result: "平局", home: homeDraw, away: awayDraw },
@@ -1456,6 +1630,89 @@ export async function fetchInjuryAnalysis(match) {
   return buildInjuryAnalysis(match, intel, webInjury);
 }
 
+function matchDateKey(match) {
+  return String(match?.date || match?.beijingDateKey || "").slice(0, 10);
+}
+
+const conditionCache = new Map();
+
+async function geocodePlace(name) {
+  if (!name) return null;
+  try {
+    const res = await fetch(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=1&language=en`,
+      { cache: "no-cache" }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const hit = data?.results?.[0];
+    if (hit?.latitude == null || hit?.longitude == null) return null;
+    return { lat: hit.latitude, lon: hit.longitude, label: hit.name };
+  } catch {
+    return null;
+  }
+}
+
+/** 主场城市天气 + 降水推断草坪干湿（Open-Meteo，不看盘） */
+export async function fetchMatchConditions(match) {
+  const date = matchDateKey(match);
+  const cacheKey = `${match.id || match.home}-${date}`;
+  if (conditionCache.has(cacheKey)) return conditionCache.get(cacheKey);
+
+  const names = [
+    ...teamSearchNames(match.home).filter((n) => /[A-Za-zÄÖÅäöå]/.test(n)),
+    match.home,
+  ].filter(Boolean);
+
+  let geo = null;
+  for (const name of names.slice(0, 3)) {
+    geo = await geocodePlace(name);
+    if (geo) break;
+  }
+  if (!geo || !date) {
+    const empty = null;
+    conditionCache.set(cacheKey, empty);
+    return empty;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const isPast = date < today;
+  const url = isPast
+    ? `https://archive-api.open-meteo.com/v1/archive?latitude=${geo.lat}&longitude=${geo.lon}&start_date=${date}&end_date=${date}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto`
+    : `https://api.open-meteo.com/v1/forecast?latitude=${geo.lat}&longitude=${geo.lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto&forecast_days=16`;
+
+  try {
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const days = data?.daily?.time || [];
+    const idx = days.indexOf(date);
+    if (idx < 0) return null;
+    const tmax = Number(data.daily.temperature_2m_max?.[idx]);
+    const tmin = Number(data.daily.temperature_2m_min?.[idx]);
+    const rain = Number(data.daily.precipitation_sum?.[idx]);
+    const temp = [tmax, tmin].every((n) => Number.isFinite(n)) ? (tmax + tmin) / 2 : tmax;
+    const payload = {
+      city: geo.label,
+      temp: Number.isFinite(temp) ? temp : null,
+      precipitation: Number.isFinite(rain) ? rain : null,
+      pitchNote: Number.isFinite(rain) ? (rain >= 3 ? "草坪偏湿" : "草坪偏干") : "",
+    };
+    conditionCache.set(cacheKey, payload);
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+export function refreshMatchStakes(match, analysis, form = null) {
+  return buildMatchStakes(match, analysis?.standingsRows || null, {
+    form: form || analysis?.form || null,
+    injury: analysis?.injury || null,
+    conditions: analysis?.conditions || null,
+  });
+}
+
 function buildAnalysisPayload(
   match,
   web,
@@ -1466,6 +1723,9 @@ function buildAnalysisPayload(
     stakesPending = false,
     webPending = false,
     stakes = null,
+    standingsRows = null,
+    conditions = null,
+    form = null,
   } = {}
 ) {
   return {
@@ -1476,7 +1736,9 @@ function buildAnalysisPayload(
     injuryPending,
     stakesPending,
     webPending,
-    stakes: stakes || buildMatchStakes(match, null),
+    standingsRows,
+    conditions,
+    stakes: stakes || buildMatchStakes(match, standingsRows, { form, injury, conditions }),
     consensus: web.consensus,
     sources: web.sources,
     injury,
@@ -1522,32 +1784,47 @@ export async function fetchAndAnalyzeMatch(match, options = {}) {
   const webP = fetchWebPredictions(match);
   const injuryP = fetchWebInjuries(match);
   const standingsP = fetchLeagueStandingsByMatch(match.id).catch(() => null);
+  const conditionsP = fetchMatchConditions(match).catch(() => null);
 
-  // 机构预测 + 官方伤停 + 积分榜并行
-  const [intel, webFull, standings] = await Promise.all([intelP, webP, standingsP]);
+  // 机构预测 + 官方伤停 + 积分榜 + 天气场地并行
+  const [intel, webFull, standings, conditions] = await Promise.all([
+    intelP,
+    webP,
+    standingsP,
+    conditionsP,
+  ]);
   web = webFull;
   if (standings?.matchTables?.length) {
     applyTableRanksToMatch(match, standings.matchTables, standings.leagueName);
   }
-  stakes = buildMatchStakes(match, standings?.rows || null);
-  analysis = buildAnalysisPayload(match, web, buildInjuryAnalysis(match, intel, null), {
+  const standingsRows = standings?.rows || null;
+  let injury = buildInjuryAnalysis(match, intel, null);
+  stakes = buildMatchStakes(match, standingsRows, { injury, conditions });
+  analysis = buildAnalysisPayload(match, web, injury, {
     complete: false,
     injuryPending: true,
     stakesPending: false,
     webPending: false,
     stakes,
+    standingsRows,
+    conditions,
   });
   cache.set(match.id, analysis);
   onUpdate?.(analysis);
 
   try {
     const webInjury = await injuryP;
-    analysis = buildAnalysisPayload(match, web, buildInjuryAnalysis(match, intel, webInjury), {
+    injury = buildInjuryAnalysis(match, intel, webInjury);
+    stakes = buildMatchStakes(match, standingsRows, { injury, conditions, form: cache.get(match.id)?.form });
+    analysis = buildAnalysisPayload(match, web, injury, {
       complete: true,
       injuryPending: false,
       stakesPending: false,
       webPending: false,
       stakes,
+      standingsRows,
+      conditions,
+      form: cache.get(match.id)?.form,
     });
   } catch {
     analysis = {
@@ -1706,10 +1983,15 @@ export function stakesReportHtml(stakes, { pending = false } = {}) {
           <div class="prediction-source-name">赛果影响</div>
           <div class="prediction-source-tag">${
             stakes.isCup ? "杯赛/淘汰语境 · 晋级与出局" : "联赛积分语境 · 争冠/欧战/保级"
-          }${pending ? " · 积分榜补齐中" : ""}</div>
+          } · 近况/伤停/关键战/天气场地${pending ? " · 积分榜补齐中" : ""}</div>
         </div>
       </div>
       ${favoredHtml}
+      ${
+        (stakes.favored?.reasons || stakes.leanReasons || []).length
+          ? `<p class="stakes-lean-reasons">${(stakes.favored?.reasons || stakes.leanReasons).join(" · ")}</p>`
+          : ""
+      }
       ${scenarioRows}
       ${
         acceptNotes.length

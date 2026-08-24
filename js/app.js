@@ -10,7 +10,6 @@ import {
   formatDateSectionLabel,
   formatOddsShort,
   formatNextUpdateLabel,
-  beijingDateKey,
 } from "./data.js";
 import { computeAllStandings, mergeStandingsWithToday, getTeamGroupRank } from "./standings.js";
 import { leagueBadgeHtml, teamLabel, isRealTeam, formatRank, flagHtml } from "./teams.js";
@@ -20,10 +19,10 @@ import {
   clearPredictionCache,
   ANALYSIS_SCHEMA,
   buildMatchStakes,
+  refreshMatchStakes,
   probBarHtml,
   outcomeClass,
   injuryReportHtml,
-  injuryBadgeText,
   webSourcesHtml,
   stakesReportHtml,
 } from "./predictions.js";
@@ -83,8 +82,6 @@ const state = {
   predictionCache: new Map(),
   predictionLoadingId: null,
   exportBusy: false,
-  resultsLiveTimer: null,
-  resultsDidScrollToday: false,
 };
 
 const els = {
@@ -101,10 +98,8 @@ const els = {
 
 const TAB_TITLES = {
   schedule: { title: "今日赛程", sub: "体彩竞彩足球 · 北京时间" },
-  results: { title: "赛果速览", sub: "完赛 · 进行中 · 未开赛" },
   standings: { title: "联赛积分", sub: "官方排名 / 赛果统计" },
   export: { title: "内容导出", sub: "竖屏战绩图 · 预测表 · 赛后核对" },
-  predictions: { title: "预测分析", sub: "全网机构预测 · 仅供参考" },
 };
 
 const DAY_FILTERS = [
@@ -199,10 +194,7 @@ function bindEvents() {
     const btn = e.target.closest(".tab-item");
     if (!btn) return;
     const next = btn.dataset.tab;
-    if (next !== "results") {
-      state.resultsDidScrollToday = false;
-      stopResultsLiveRefresh();
-    }
+    if (!TAB_TITLES[next]) return;
     state.tab = next;
     updateTabs();
     render();
@@ -226,7 +218,7 @@ function bindEvents() {
   window.addEventListener("resize", () => {
     clearTimeout(marqueeResizeTimer);
     marqueeResizeTimer = setTimeout(() => {
-      if (state.tab === "schedule" || state.tab === "results") setupTeamNameMarquee(els.main);
+      if (state.tab === "schedule") setupTeamNameMarquee(els.main);
     }, 150);
   });
 }
@@ -235,7 +227,7 @@ function updateTabs() {
   els.tabBar.querySelectorAll(".tab-item").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === state.tab);
   });
-  const meta = TAB_TITLES[state.tab];
+  const meta = TAB_TITLES[state.tab] || TAB_TITLES.schedule;
   els.pageTitle.textContent = meta.title;
   els.pageSubtitle.textContent = meta.sub;
 }
@@ -247,20 +239,11 @@ function renderLoading() {
 function render() {
   updateTabs();
   if (state.tab === "schedule") {
-    stopResultsLiveRefresh();
     renderSchedule();
-  } else if (state.tab === "results") {
-    renderResults();
-    startResultsLiveRefresh();
   } else if (state.tab === "standings") {
-    stopResultsLiveRefresh();
     renderStandings();
-  } else if (state.tab === "export") {
-    stopResultsLiveRefresh();
-    renderExport();
   } else {
-    stopResultsLiveRefresh();
-    renderPredictions();
+    renderExport();
   }
 }
 
@@ -312,291 +295,6 @@ function renderSchedule() {
 
 function renderScheduleToolbar(currentFilter) {
   return `<div class="schedule-toolbar">${renderFilterBar(currentFilter)}</div>`;
-}
-
-function historyOutcomeMeta(match) {
-  if (!match?.finished || match.homeScore == null || match.awayScore == null) {
-    return { label: "待定", cls: "pending" };
-  }
-  if (match.homeScore > match.awayScore) return { label: "主胜", cls: "win" };
-  if (match.homeScore < match.awayScore) return { label: "主负", cls: "loss" };
-  return { label: "平局", cls: "draw" };
-}
-
-function matchKickoffMs(match) {
-  if (match?.utc) {
-    const ms = new Date(match.utc).getTime();
-    if (Number.isFinite(ms)) return ms;
-  }
-  const date = String(match?.beijingDateKey || match?.date || "");
-  const time = String(match?.time || match?.beijingTime || "00:00").slice(0, 5);
-  if (!date) return NaN;
-  const ms = Date.parse(`${date}T${time}:00+08:00`);
-  return Number.isNaN(ms) ? Date.parse(`${date}T00:00:00+08:00`) : ms;
-}
-
-/** history | live | finished | upcoming */
-function classifyResultsPhase(match, now = new Date(), todayKey = beijingDateKey(now)) {
-  const dateKey = String(match?.beijingDateKey || match?.date || "");
-  if (match?.finished) {
-    return dateKey && dateKey < todayKey ? "history" : "finished";
-  }
-  const kick = matchKickoffMs(match);
-  if (Number.isFinite(kick) && kick <= now.getTime()) return "live";
-  if (dateKey && dateKey > todayKey) return "upcoming";
-  if (dateKey === todayKey) return "upcoming";
-  // 日期已过但尚无赛果
-  return "live";
-}
-
-function collectResultsPool() {
-  const map = new Map();
-  for (const m of [...(state.history || []), ...(state.allMatches || []), ...(state.matches || [])]) {
-    if (m?.id == null) continue;
-    const prev = map.get(m.id);
-    if (!prev) {
-      map.set(m.id, m);
-      continue;
-    }
-    // 完赛记录优先保留比分；开售记录优先保留赔率
-    map.set(
-      m.id,
-      prev.finished
-        ? { ...m, ...prev, odds: m.odds ?? prev.odds, hhad: m.hhad ?? prev.hhad }
-        : m.finished
-          ? { ...prev, ...m, odds: prev.odds ?? m.odds, hhad: prev.hhad ?? m.hhad }
-          : { ...prev, ...m }
-    );
-  }
-  return [...map.values()];
-}
-
-function buildResultsTimeline(historyDays = 14) {
-  const now = new Date();
-  const todayKey = beijingDateKey(now);
-  const pastStart = (() => {
-    const d = new Date(now.getTime());
-    // 用北京日期字符串回推
-    const [y, mo, da] = todayKey.split("-").map(Number);
-    const utc = new Date(Date.UTC(y, mo - 1, da));
-    utc.setUTCDate(utc.getUTCDate() - historyDays);
-    return utc.toISOString().slice(0, 10);
-  })();
-
-  const pool = collectResultsPool();
-  const history = [];
-  const today = [];
-  const upcoming = [];
-
-  for (const m of pool) {
-    const dateKey = String(m.beijingDateKey || m.date || "");
-    if (!dateKey) continue;
-    if (dateKey === todayKey) {
-      today.push(m);
-      continue;
-    }
-    if (dateKey < todayKey) {
-      if (dateKey >= pastStart) history.push(m);
-      continue;
-    }
-    upcoming.push(m);
-  }
-
-  const byKickAsc = (a, b) => {
-    const da = matchKickoffMs(a);
-    const db = matchKickoffMs(b);
-    if (Number.isFinite(da) && Number.isFinite(db) && da !== db) return da - db;
-    return String(a.num || "").localeCompare(String(b.num || ""), "zh");
-  };
-
-  history.sort(byKickAsc);
-  today.sort(byKickAsc);
-  upcoming.sort(byKickAsc);
-
-  const groupAsc = (list) => {
-    const map = new Map();
-    for (const m of list) {
-      const key = m.beijingDateKey || m.date;
-      if (!map.has(key)) map.set(key, { key, label: formatDateSectionLabel(key), items: [] });
-      map.get(key).items.push(m);
-    }
-    return [...map.values()].sort((a, b) => String(a.key).localeCompare(String(b.key)));
-  };
-
-  return {
-    todayKey,
-    historyGroups: groupAsc(history),
-    todayMatches: today,
-    upcomingGroups: groupAsc(upcoming),
-    liveCount: today.filter((m) => classifyResultsPhase(m, now, todayKey) === "live").length,
-    finishedToday: today.filter((m) => m.finished).length,
-  };
-}
-
-function resultsMatchCardHtml(m, todayKey) {
-  const phase = classifyResultsPhase(m, new Date(), todayKey);
-  const roundLabel = m.leagueShort || m.round || m.group;
-  const showScore = m.finished && m.homeScore != null && m.awayScore != null;
-  const homeScore = showScore ? m.homeScore : null;
-  const awayScore = showScore ? m.awayScore : null;
-  const outcome = historyOutcomeMeta(m);
-
-  let statusHtml = "";
-  if (phase === "live") {
-    statusHtml = `<span class="results-status results-status--live">进行中</span>`;
-  } else if (showScore) {
-    statusHtml = `<span class="history-outcome history-outcome--${outcome.cls}">${outcome.label}</span>
-      <span class="history-score-text">${m.homeScore}:${m.awayScore}</span>`;
-  } else {
-    statusHtml = `<span class="results-status results-status--upcoming">未开赛</span>`;
-  }
-
-  const phaseClass =
-    phase === "live" ? "results-card--live" : showScore ? "finished results-card--done" : "results-card--upcoming";
-
-  return `
-    <article class="match-card history-result-card ${phaseClass}" data-match-id="${m.id}">
-      <div class="match-card-line">
-        <span class="group-badge" style="background:#${m.leagueColor || "64748b"}">${roundLabel}</span>
-        ${teamInline(m.home, homeScore, "home", m, false)}
-        <span class="match-vs">VS</span>
-        ${teamInline(m.away, awayScore, "away", m, false)}
-        <span class="match-time">${m.beijingTime || "—"}</span>
-      </div>
-      <div class="match-meta history-result-meta">
-        ${m.num ? `<span class="match-num">${m.num}</span>` : ""}
-        ${statusHtml}
-        ${m.odds ? `<span class="match-odds">${formatOddsShort(m.odds)}</span>` : ""}
-      </div>
-    </article>`;
-}
-
-function resultsSectionHtml(label, matches, todayKey, { id = "", extraClass = "" } = {}) {
-  if (!matches?.length) return "";
-  return `
-    <section class="results-day ${extraClass}" ${id ? `id="${id}"` : ""}>
-      <div class="section-label">${label}</div>
-      ${matches.map((m) => resultsMatchCardHtml(m, todayKey)).join("")}
-    </section>`;
-}
-
-function stopResultsLiveRefresh() {
-  if (state.resultsLiveTimer) {
-    clearInterval(state.resultsLiveTimer);
-    state.resultsLiveTimer = null;
-  }
-}
-
-function getResultsScrollTop() {
-  return window.scrollY || document.documentElement.scrollTop || els.main.scrollTop || 0;
-}
-
-function setResultsScrollTop(top) {
-  window.scrollTo(0, top);
-}
-
-function startResultsLiveRefresh() {
-  stopResultsLiveRefresh();
-  state.resultsLiveTimer = setInterval(async () => {
-    if (state.tab !== "results") {
-      stopResultsLiveRefresh();
-      return;
-    }
-    try {
-      const data = await fetchLatestLotteryData();
-      applyFetchedData(data);
-      // applyFetchedData → render() 会走 renderResults，并保留滚动
-    } catch {
-      /* 静默失败，保留当前列表 */
-    }
-  }, 60_000);
-}
-
-function renderResults({ preserveScroll = null } = {}) {
-  const keepScroll =
-    preserveScroll != null ? preserveScroll : state.resultsDidScrollToday ? getResultsScrollTop() : null;
-
-  const timeline = buildResultsTimeline(14);
-  const todayLabel = formatDateSectionLabel(timeline.todayKey);
-  const hasAny =
-    timeline.historyGroups.length || timeline.todayMatches.length || timeline.upcomingGroups.length;
-
-  const historyHtml = timeline.historyGroups
-    .map((g) => resultsSectionHtml(g.label, g.items, timeline.todayKey))
-    .join("");
-
-  const todayHtml = timeline.todayMatches.length
-    ? resultsSectionHtml(`${todayLabel} · 今天`, timeline.todayMatches, timeline.todayKey, {
-        id: "results-today-anchor",
-        extraClass: "results-day--today",
-      })
-    : `<section class="results-day results-day--today" id="results-today-anchor">
-        <div class="section-label">${todayLabel} · 今天</div>
-        <div class="results-empty-today">今日暂无竞彩场次</div>
-      </section>`;
-
-  const upcomingHtml = timeline.upcomingGroups
-    .map((g) => resultsSectionHtml(g.label, g.items, timeline.todayKey))
-    .join("");
-
-  const liveHint =
-    timeline.liveCount > 0
-      ? `进行中 ${timeline.liveCount} 场`
-      : timeline.finishedToday > 0
-        ? `今日已完赛 ${timeline.finishedToday} 场`
-        : "暂无进行中场次";
-
-  els.main.innerHTML = `
-    <div class="results-page">
-      <div class="results-toolbar">
-        <div class="results-toolbar-text">上滑看历史 · 下滑看未开赛</div>
-        <div class="results-toolbar-live">${liveHint} · 约每分钟刷新</div>
-      </div>
-      ${
-        hasAny
-          ? `${historyHtml}${todayHtml}${upcomingHtml}`
-          : `<div class="empty-state"><div class="icon">📭</div><p>暂无赛果数据</p><p class="detail-note">可点下方「立即检索」拉取最新开售与完赛</p></div>`
-      }
-      ${dataSourceNote()}
-    </div>
-  `;
-
-  bindMatchCards(els.main);
-  scheduleTeamNameMarquee(els.main);
-
-  if (keepScroll != null) {
-    requestAnimationFrame(() => setResultsScrollTop(keepScroll));
-    return;
-  }
-
-  state.resultsDidScrollToday = true;
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const anchor = document.getElementById("results-today-anchor");
-      if (anchor) anchor.scrollIntoView({ block: "start", behavior: "auto" });
-    });
-  });
-}
-
-function historyMatchCardHtml(m) {
-  const outcome = historyOutcomeMeta(m);
-  const roundLabel = m.leagueShort || m.round || m.group;
-  return `
-    <article class="match-card finished history-result-card" data-match-id="${m.id}">
-      <div class="match-card-line">
-        <span class="group-badge" style="background:#${m.leagueColor || "64748b"}">${roundLabel}</span>
-        ${teamInline(m.home, m.homeScore, "home", m, false)}
-        <span class="match-vs">VS</span>
-        ${teamInline(m.away, m.awayScore, "away", m, false)}
-        <span class="match-time">${m.beijingTime || "—"}</span>
-      </div>
-      <div class="match-meta history-result-meta">
-        ${m.num ? `<span class="match-num">${m.num}</span>` : ""}
-        <span class="history-outcome history-outcome--${outcome.cls}">${outcome.label}</span>
-        <span class="history-score-text">${m.homeScore}:${m.awayScore}</span>
-        ${m.odds ? `<span class="match-odds">${formatOddsShort(m.odds)}</span>` : ""}
-      </div>
-    </article>`;
 }
 
 function purchasableMatches() {
@@ -708,13 +406,13 @@ async function collectMatchExportData(match, onProgress) {
       sources: [],
       consensus: { pick: null, bullets: [], goals: null },
       injury,
-      stakes: buildMatchStakes(match, null),
+      stakes: buildMatchStakes(match, null, { form, injury }),
     };
   } else {
     analysis = {
       ...analysis,
       injury: analysis.injury || injury,
-      stakes: analysis.stakes || buildMatchStakes(match, null),
+      stakes: refreshMatchStakes(match, { ...analysis, injury: analysis.injury || injury }, form),
     };
   }
   analysis = { ...analysis, form };
@@ -1102,8 +800,10 @@ async function openMatchDetail(match) {
       </div>
       ${historyTeamBlockHtml(match.home, homeMatches, match, rankLookup)}
       ${historyTeamBlockHtml(match.away, awayMatches, match, rankLookup)}
+      ${matchDetailPredictionSlotHtml(match)}
     `;
     scheduleTeamNameMarquee(els.subContent);
+    loadMatchDetailPrediction(match);
   } catch (err) {
     const localHome = getTeamMatches(state.allMatches, match.home)
       .filter((m) => m.id !== match.id)
@@ -1124,7 +824,51 @@ async function openMatchDetail(match) {
       ${historyTeamBlockHtml(match.home, localHome, match, rankLookup)}
       ${historyTeamBlockHtml(match.away, localAway, match, rankLookup)}
       <p class="detail-note">远程战绩加载失败，已显示本地缓存数据。</p>
+      ${matchDetailPredictionSlotHtml(match)}
     `;
+    console.error(err);
+    loadMatchDetailPrediction(match);
+  }
+}
+
+function matchDetailPredictionSlotHtml(match) {
+  return `
+    <section class="match-detail-prediction" id="match-detail-prediction" data-match-id="${match.id}">
+      <div class="prediction-section-title">预测分析</div>
+      <div class="loading loading--inline"><div class="spinner"></div><span>正在生成倾向与赛果影响…</span></div>
+    </section>`;
+}
+
+function isMatchDetailOpen(match) {
+  return (
+    els.subTitle.textContent === "比赛详情" &&
+    els.subContent.querySelector(`#match-detail-prediction[data-match-id="${match.id}"]`)
+  );
+}
+
+function renderMatchDetailPrediction(match, analysis) {
+  const slot = els.subContent.querySelector(`#match-detail-prediction[data-match-id="${match.id}"]`);
+  if (!slot || els.subTitle.textContent !== "比赛详情") return;
+  slot.innerHTML = `
+    <div class="prediction-section-title">预测分析</div>
+    ${predictionAnalysisBodyHtml(match, analysis)}
+  `;
+  scheduleTeamNameMarquee(slot);
+}
+
+async function loadMatchDetailPrediction(match) {
+  try {
+    await loadPredictionAnalysis(match, {
+      shouldContinue: () => isMatchDetailOpen(match),
+      onUpdate: (analysis) => renderMatchDetailPrediction(match, analysis),
+    });
+  } catch (err) {
+    const slot = els.subContent.querySelector(`#match-detail-prediction[data-match-id="${match.id}"]`);
+    if (slot && els.subTitle.textContent === "比赛详情") {
+      slot.innerHTML = `
+        <div class="prediction-section-title">预测分析</div>
+        <p class="detail-note">预测分析加载失败，请返回后重新打开本场。</p>`;
+    }
     console.error(err);
   }
 }
@@ -1221,44 +965,6 @@ async function renderStandings() {
   }
 
   renderStandingsContent(getTodayStandingsGroups());
-}
-
-function renderPredictions() {
-  const matches = sortMatchesByTime(state.matches.filter((m) => !m.finished));
-  els.main.innerHTML = [
-    `<p class="predictions-intro">打开场次后先给出赛果影响（晋级/保级等），再补充 Forebet / PredictZ 等机构摘要与伤停；无机构观点时不展示体彩隐含概率。</p>`,
-    matches.length
-      ? matches.map((m) => predictionCardHtml(m)).join("")
-      : `<div class="empty-state"><div class="icon">🔮</div><p>当前暂无待预测场次</p></div>`,
-    `<p class="predictions-disclaimer">⚠️ 外部预测仅供参考，不构成投注建议。请理性看球，未成年人不得购彩。</p>`,
-    dataSourceNote(),
-  ].join("");
-
-  bindMatchCards(els.main, openPredictionDetail);
-  scheduleTeamNameMarquee(els.main);
-}
-
-function predictionCardHtml(m) {
-  const cached = state.predictionCache.get(m.id);
-  const agencySources = (cached?.sources || []).filter((s) => !s.local);
-  const pick = agencySources.length
-    ? cached?.consensus?.pick || cached?.summary?.pick
-    : null;
-  const injuryNote = injuryBadgeText(cached?.injury);
-  const badge = pick
-    ? `<span class="prediction-badge prediction-badge--${outcomeClass(pick.key)}">倾向 ${pick.short}${pick.prob != null ? ` ${Math.round(pick.prob * 100)}%` : ""}</span>`
-    : `<span class="prediction-badge prediction-badge--pending">查看分析</span>`;
-  const injuryBadge = injuryNote
-    ? `<span class="prediction-badge prediction-badge--injury">${injuryNote}</span>`
-    : "";
-
-  const numHtml = m.num ? `<span class="match-num">${m.num}${m.single ? " · 单关" : ""}</span>` : "";
-
-  return `
-    <article class="match-card prediction-card" data-match-id="${m.id}">
-      ${matchCardHtml(m, { asInner: true, hideMeta: true, showRank: true })}
-      <div class="prediction-card-footer">${numHtml}<span class="prediction-card-footer-badges">${badge}${injuryBadge}</span></div>
-    </article>`;
 }
 
 function formResultClass(result) {
@@ -2608,13 +2314,8 @@ function commonOpponentsCardHtml(match, form) {
     </div>`;
 }
 
-async function openPredictionDetail(match) {
-  els.subTitle.textContent = "预测分析";
-  els.subContent.innerHTML = `
-    <div class="loading"><div class="spinner"></div><span>正在生成倾向与赛果影响…</span></div>
-  `;
-  showSubPage();
-
+async function loadPredictionAnalysis(match, { onUpdate, shouldContinue } = {}) {
+  const alive = () => !shouldContinue || shouldContinue();
   let form = state.predictionCache.get(match.id)?.form || { pending: true, home: [], away: [] };
   const needFormReload =
     !form ||
@@ -2625,12 +2326,12 @@ async function openPredictionDetail(match) {
     !form.scoreHome ||
     !form.scoreAway;
 
-  const render = (analysis) => {
-    if (els.subTitle.textContent !== "预测分析") return;
+  const publish = (analysis) => {
+    if (!alive()) return;
     const merged = { ...(analysis || {}), form };
+    merged.stakes = refreshMatchStakes(match, merged, form);
     state.predictionCache.set(match.id, merged);
-    els.subContent.innerHTML = predictionDetailHtml(match, merged);
-    scheduleTeamNameMarquee(els.subContent);
+    onUpdate?.(merged);
   };
 
   const formPromise = needFormReload
@@ -2638,7 +2339,7 @@ async function openPredictionDetail(match) {
         .then((data) => {
           form = data;
           const cached = state.predictionCache.get(match.id) || { schema: ANALYSIS_SCHEMA, complete: false };
-          render({ ...cached, form });
+          publish({ ...cached, form });
         })
         .catch(() => {
           form = {
@@ -2652,68 +2353,56 @@ async function openPredictionDetail(match) {
             tempoStyle: null,
           };
           const cached = state.predictionCache.get(match.id);
-          if (cached) render({ ...cached, form });
+          if (cached) publish({ ...cached, form });
         })
     : Promise.resolve(form);
 
-  try {
-    let analysis = state.predictionCache.get(match.id);
-    if (!analysis || analysis.schema !== ANALYSIS_SCHEMA || !analysis.complete) {
-      state.predictionLoadingId = match.id;
-      analysis = await fetchAndAnalyzeMatch(match, {
-        onUpdate: (partial) => {
-          const merged = { ...partial, form };
-          state.predictionCache.set(match.id, merged);
-          render(merged);
-          if (state.tab === "predictions") renderPredictions();
-        },
-      });
-      analysis = { ...analysis, form };
-      state.predictionCache.set(match.id, analysis);
-      state.predictionLoadingId = null;
-      if (state.tab === "predictions") renderPredictions();
-    }
-    await formPromise;
+  let analysis = state.predictionCache.get(match.id);
+  if (!analysis || analysis.schema !== ANALYSIS_SCHEMA || !analysis.complete) {
+    state.predictionLoadingId = match.id;
+    analysis = await fetchAndAnalyzeMatch(match, {
+      onUpdate: (partial) => {
+        publish({ ...partial, form });
+      },
+    });
     analysis = { ...analysis, form };
     state.predictionCache.set(match.id, analysis);
-    render(analysis);
-  } catch (err) {
-    els.subContent.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>预测检索失败，请稍后重试</p></div>`;
-    console.error(err);
+    state.predictionLoadingId = null;
   }
+  await formPromise;
+  analysis = { ...analysis, form };
+  state.predictionCache.set(match.id, analysis);
+  publish(analysis);
+  return analysis;
 }
 
-function predictionDetailHtml(match, analysis) {
+function predictionConsensusHtml(match, analysis) {
   const agencySources = (analysis.sources || []).filter((s) => !s.local);
   const consensus = analysis.consensus || analysis.summary || {};
-  // 仅在有真实机构源时展示综合倾向；不用体彩隐含概率顶替
   const pick = agencySources.length ? consensus.pick : null;
+  const webPending = !!analysis.webPending;
+  const emptyNote = webPending ? "机构观点加载中…" : "暂无机构观点摘要。";
+  if (!pick) return `<p class="prediction-empty-note">${emptyNote}</p>`;
+  return `
+    <div class="prediction-verdict">
+      <div class="prediction-verdict-label">综合倾向</div>
+      <div class="prediction-verdict-value prediction-verdict-value--${outcomeClass(pick.key)}">${pick.label}</div>
+      <div class="prediction-verdict-meta">${consensus.tagline || consensus.confidence || "全网聚合"}</div>
+    </div>
+    ${probBarHtml(consensus.probs)}
+    ${
+      consensus.bullets?.length
+        ? `<ul class="prediction-bullets">${consensus.bullets.map((b) => `<li>${b}</li>`).join("")}</ul>`
+        : ""
+    }`;
+}
+
+function predictionAnalysisBodyHtml(match, analysis, { includeConsensus = true } = {}) {
+  const consensus = analysis.consensus || analysis.summary || {};
   const scoreOutlook = buildScoreOutlook(match, analysis.form, consensus.goals);
   const webPending = !!analysis.webPending;
-  const emptyNote = webPending
-    ? "机构观点加载中…"
-    : "暂无机构观点摘要。";
-
   return `
-    <div class="detail-card prediction-summary-card">
-      <h3>⚽ ${match.league || match.group}${match.num ? ` · ${match.num}` : ""}</h3>
-      ${matchCardHtml(match, { static: true, hideMeta: true, hideRound: true })}
-      ${
-        pick
-          ? `<div class="prediction-verdict">
-              <div class="prediction-verdict-label">综合倾向</div>
-              <div class="prediction-verdict-value prediction-verdict-value--${outcomeClass(pick.key)}">${pick.label}</div>
-              <div class="prediction-verdict-meta">${consensus.tagline || consensus.confidence || "全网聚合"}</div>
-            </div>
-            ${probBarHtml(consensus.probs)}
-            ${
-              consensus.bullets?.length
-                ? `<ul class="prediction-bullets">${consensus.bullets.map((b) => `<li>${b}</li>`).join("")}</ul>`
-                : ""
-            }`
-          : `<p class="prediction-empty-note">${emptyNote}</p>`
-      }
-    </div>
+    ${includeConsensus ? predictionConsensusHtml(match, analysis) : ""}
 
     <div class="prediction-section-title">赛果影响 · 谁更能接受平局</div>
     ${stakesReportHtml(analysis.stakes, { pending: !!analysis.stakesPending })}
