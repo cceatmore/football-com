@@ -4,7 +4,6 @@ import {
   startAutoDataRefresh,
   filterByDays,
   sortMatchesByTime,
-  getFinishedLotteryMatches,
   getTeamMatches,
   formatMatchupHtml,
   formatDateSectionLabel,
@@ -31,6 +30,7 @@ import {
   getTeamHistoryList,
   getH2hList,
   fetchTeamRecentForm,
+  pickTeamHistory,
   collectLocalTeamMatches,
   clearMatchHistoryCache,
   findTeamMatchMeta,
@@ -51,18 +51,6 @@ import {
   applyTableRanksToMatch,
   enrichMatchesWithTableRanks,
 } from "./leagueStandings.js";
-import {
-  renderMatchHistoryBundleImage,
-  buildPredictionsWorkbook,
-  gradeImportedWorkbook,
-  packExportZip,
-  downloadBlob,
-  matchFolderName,
-  dateFolderName,
-  stamp,
-  loadDeps,
-} from "./exportBundle.js";
-
 const state = {
   tab: "schedule",
   dayFilter: "all",
@@ -81,7 +69,9 @@ const state = {
   sourceLabel: "内置数据",
   predictionCache: new Map(),
   predictionLoadingId: null,
-  exportBusy: false,
+  trendsCache: new Map(),
+  trendsLoadingId: null,
+  trendsLiveTried: false,
 };
 
 const els = {
@@ -99,7 +89,7 @@ const els = {
 const TAB_TITLES = {
   schedule: { title: "今日赛程", sub: "体彩竞彩足球 · 北京时间" },
   standings: { title: "联赛积分", sub: "官方排名 / 赛果统计" },
-  export: { title: "内容导出", sub: "竖屏战绩图 · 预测表 · 赛后核对" },
+  trends: { title: "近15场走势", sub: "双方历史 · 半全场结果" },
 };
 
 const DAY_FILTERS = [
@@ -144,6 +134,7 @@ function applyData(data) {
   state.sourceLabel = data.sourceLabel;
   clearPredictionCache();
   state.predictionCache.clear();
+  state.trendsCache.clear();
   clearMatchHistoryCache();
   clearLeagueStandingsCache();
   state.standingsGroups = null;
@@ -243,7 +234,7 @@ function render() {
   } else if (state.tab === "standings") {
     renderStandings();
   } else {
-    renderExport();
+    renderTrends();
   }
 }
 
@@ -297,244 +288,360 @@ function renderScheduleToolbar(currentFilter) {
   return `<div class="schedule-toolbar">${renderFilterBar(currentFilter)}</div>`;
 }
 
-function purchasableMatches() {
-  return sortMatchesByTime(state.matches.filter((m) => !m.finished));
+const TREND_MATCH_LIMIT = 15;
+const TREND_H2H_LIMIT = 5;
+
+function sortTrendsMatches(matches) {
+  return [...matches].sort((a, b) => {
+    const an = Number(a.matchNum);
+    const bn = Number(b.matchNum);
+    if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+    return String(a.num || "").localeCompare(String(b.num || ""), "zh");
+  });
 }
 
-function setExportStatus(text) {
-  const el = document.getElementById("export-status");
-  if (el) el.textContent = text || "";
+function renderTrends() {
+  if (state.dataSource !== "live" && !state.trendsLiveTried) {
+    state.trendsLiveTried = true;
+    fetchLatestLotteryData()
+      .then((data) => {
+        if (data?.source === "live") applyFetchedData(data);
+      })
+      .catch(() => {});
+  }
+  const matches = sortTrendsMatches(upcomingMatches("all"));
+  const html = [
+    matches.length
+      ? groupMatchesByDate(matches)
+          .map(({ label, items }) => trendDayHtml(label, items))
+          .join("")
+      : `<div class="empty-state"><div class="icon">📈</div><p>当前暂无即将开打场次</p></div>`,
+    dataSourceNote(),
+  ].join("");
+
+  els.main.innerHTML = html;
+  els.main.querySelectorAll(".trend-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const id = Number(row.dataset.matchId);
+      const match = state.matches.find((m) => m.id === id) || state.allMatches.find((m) => m.id === id);
+      if (match) openTrendsDetail(match);
+    });
+  });
 }
 
-function renderExport() {
-  const matches = purchasableMatches();
-  const groups = groupMatchesByDate(matches);
-  const daySummary = groups
-    .map((g) => `${g.label} ${g.items.length} 场`)
-    .join(" · ");
+function trendDayHtml(label, matches) {
+  return `
+    <section class="trend-day">
+      <h3 class="trend-day-label">${label}</h3>
+      ${matches.map((m) => trendRowHtml(m)).join("")}
+    </section>`;
+}
 
-  els.main.innerHTML = `
-    <div class="export-page">
-      <p class="export-intro">导出当前可购买场次的竖屏综合战绩图（交手历史 + 近10场 + 共同对手）与预测 Excel。可先改表内预测再导入；核对只认导入文件里的当前内容，猜对的胜负/比分标红。</p>
-      <div class="export-stat-card">
-        <div class="export-stat-value">${matches.length}</div>
-        <div class="export-stat-label">可购买场次</div>
-        <div class="export-stat-meta">${daySummary || "暂无在售场次"}</div>
+function trendRowHtml(match) {
+  const league = match.leagueShort || match.league || match.group || "";
+  return `
+    <button class="trend-row" type="button" data-match-id="${match.id}">
+      <span class="trend-row-meta">
+        <span class="trend-row-time">${match.beijingTime || "待定"}</span>
+        ${match.num ? `<span class="trend-row-num">${match.num}</span>` : ""}
+        ${league ? `<span class="trend-row-league">${league}</span>` : ""}
+      </span>
+      <span class="trend-row-matchup">
+        <span class="trend-row-team">${teamLabel(match.home)}</span>
+        <span class="trend-row-vs">对</span>
+        <span class="trend-row-team">${teamLabel(match.away)}</span>
+      </span>
+    </button>`;
+}
+
+function outcomeFromGoals(gf, ga) {
+  if (gf == null || ga == null || Number.isNaN(Number(gf)) || Number.isNaN(Number(ga))) return "";
+  if (Number(gf) > Number(ga)) return "胜";
+  if (Number(gf) < Number(ga)) return "负";
+  return "平";
+}
+
+function teamHtFtLabel(match, team) {
+  const ft = teamResultLabel(match, team);
+  if (ft === "未赛") return "";
+  const resolved = resolveTeamInMatch(match, team);
+  if (!resolved) return `—${ft}`;
+  const isHome = resolved === match.home;
+  const ht = outcomeFromGoals(
+    isHome ? match.homeHtScore : match.awayHtScore,
+    isHome ? match.awayHtScore : match.homeHtScore
+  );
+  return `${ht || "—"}${ft}`;
+}
+
+function htftChipClass(label) {
+  if (!label || label.startsWith("—")) return "pending";
+  if (label === "胜胜") return "ww";
+  if (label === "负负") return "ll";
+  if (label === "平平") return "dd";
+  if ((label[0] === "胜" && label[1] === "负") || (label[0] === "负" && label[1] === "胜")) return "flip";
+  if (label[1] === "胜") return "fw";
+  if (label[1] === "负") return "fl";
+  return "mid";
+}
+
+function summarizeHtft(matches, team) {
+  const counts = new Map();
+  let known = 0;
+  for (const m of matches || []) {
+    const label = teamHtFtLabel(m, team);
+    if (!label || label.startsWith("—")) continue;
+    known += 1;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return { ranked, known };
+}
+
+function htftStripHtml(matches, team) {
+  const chips = [...(matches || [])]
+    .reverse()
+    .map((m) => {
+      const label = teamHtFtLabel(m, team) || "——";
+      return `<span class="htft-chip htft-chip--${htftChipClass(label)}" title="${formatHistoryDateShort(m)}">${label}</span>`;
+    })
+    .join("");
+  return `<div class="htft-strip">${chips || '<span class="htft-empty">暂无半全场样本</span>'}</div>`;
+}
+
+function htftProbText(matches, team) {
+  const { ranked, known } = summarizeHtft(matches, team);
+  if (!known) return "";
+  return ranked.map(([label, n]) => `${label} ${Math.round((n / known) * 100)}%`).join(" · ");
+}
+
+function htftSummaryHtml(matches, team) {
+  const text = htftProbText(matches, team);
+  if (!text) return `<p class="htft-summary">半全场样本不足</p>`;
+  return `<p class="htft-summary">${text}</p>`;
+}
+
+function trendMatchItemHtml(match, team) {
+  const result = teamResultLabel(match, team);
+  const resultClass =
+    result === "胜" ? "win" : result === "负" ? "loss" : result === "平" ? "draw" : "pending";
+  const when = formatHistoryDateShort(match);
+  const htft = teamHtFtLabel(match, team);
+  const resolved = resolveTeamInMatch(match, team);
+  const isHome = resolved === match.home;
+  const ft =
+    match.finished && match.homeScore != null && match.awayScore != null
+      ? `${match.homeScore}:${match.awayScore}`
+      : "";
+  const ht =
+    match.homeHtScore != null && match.awayHtScore != null
+      ? `${match.homeHtScore}:${match.awayHtScore}`
+      : "";
+  const opp =
+    resolved === match.home ? match.away : resolved === match.away ? match.home : match.away;
+  const venue = resolved ? (isHome ? "主" : "客") : "";
+  return `
+    <div class="history-match-item history-match-item--compact result-${resultClass}">
+      <span class="htft-chip htft-chip--${htftChipClass(htft)}">${htft || "——"}</span>
+      ${when ? `<span class="history-match-when">${when}</span>` : ""}
+      <span class="history-match-body">${venue ? `${venue} · ` : ""}${teamLabel(opp)}${ft ? `　${ft}` : ""}${ht ? `（半 ${ht}）` : ""}</span>
+    </div>`;
+}
+
+function trendTeamBlockHtml(team, matches, metaMatch = null) {
+  const list = (matches || []).slice(0, TREND_MATCH_LIMIT);
+  const meta = teamLeagueMeta(team) || (metaMatch ? `${metaMatch.leagueShort || metaMatch.group}` : null);
+  const displayMatch = findTeamMatchMeta(metaMatch, team) || list[0] || metaMatch;
+  const side = metaMatch && resolveTeamInMatch(metaMatch, team) === metaMatch.home ? "本场主队" : metaMatch && resolveTeamInMatch(metaMatch, team) === metaMatch.away ? "本场客队" : "";
+  return `
+    <div class="history-team-block trend-team-block">
+      <div class="history-team-header">
+        ${flagHtml(team, 28, displayMatch)}
+        <div class="history-team-info">
+          <div class="history-team-name">${teamLabel(team)}${side ? `<span class="trend-side">${side}</span>` : ""}</div>
+          <div class="history-team-meta">${meta || "近期战绩"} · 近 ${list.length} 场</div>
+        </div>
       </div>
+      ${htftStripHtml(list, team)}
+      ${htftSummaryHtml(list, team)}
+      ${
+        list.length
+          ? `<div class="history-matches-list">${list.map((m) => trendMatchItemHtml(m, team)).join("")}</div>`
+          : '<p class="history-empty">暂无比赛记录</p>'
+      }
+    </div>`;
+}
 
-      <button class="action-btn export-btn" id="btn-export-bundle" type="button" ${state.exportBusy ? "disabled" : ""}>
-        ${state.exportBusy ? "导出进行中…" : "导出内容（图片 + Excel）"}
-      </button>
-      <button class="action-btn export-btn export-btn--secondary" id="btn-import-excel" type="button" ${state.exportBusy ? "disabled" : ""}>
-        导入 Excel 核对赛果
-      </button>
-      <input id="import-excel-input" type="file" accept=".xlsx,.xls" hidden />
+function isTrendsDetailOpen(match) {
+  return (
+    els.subTitle.textContent === "半全场走势" &&
+    els.subContent.querySelector(`[data-trend-match="${match.id}"]`)
+  );
+}
 
-      <p class="export-status" id="export-status"></p>
-      <ul class="export-tips">
-        <li>每场一张综合图：双方交手历史、双方近10场、共同对手对比（高度随内容）</li>
-        <li>共同对手最多5个（先近1年，没有再近2年；仍没有则该段不画）</li>
-        <li>同一天多场会按日期分子文件夹打包 ZIP</li>
-        <li>Excel：胜负最多两项、半全场（胜胜/胜负等）、比分随大小球走势；可改内容后再导入</li>
-        <li>导入时只按你表里当前的胜负/比分预测核对完赛结果，猜对标红（不依赖导出时的原值）</li>
-      </ul>
-      ${dataSourceNote()}
-    </div>
+function trendH2hBlockHtml(matches, perspectiveTeam) {
+  const list = (matches || []).slice(0, TREND_H2H_LIMIT);
+  const rows = list.length
+    ? list.map((m) => trendH2hItemHtml(m, perspectiveTeam)).join("")
+    : '<p class="history-empty">暂无双方碰面记录</p>';
+  const prob = htftProbText(list, perspectiveTeam);
+  return `
+    <section class="trend-h2h">
+      <h3 class="trend-block-title">双方碰面 · 最多 ${TREND_H2H_LIMIT} 场</h3>
+      ${prob ? `<p class="htft-summary">${prob}</p>` : ""}
+      <div class="history-matches-list">${rows}</div>
+    </section>`;
+}
+
+function trendH2hItemHtml(match, perspectiveTeam) {
+  const htft = teamHtFtLabel(match, perspectiveTeam);
+  const when = formatHistoryDateShort(match);
+  const ft =
+    match.homeScore != null && match.awayScore != null ? `${match.homeScore}:${match.awayScore}` : "—";
+  const ht =
+    match.homeHtScore != null && match.awayHtScore != null
+      ? `半 ${match.homeHtScore}:${match.awayHtScore}`
+      : "";
+  return `
+    <div class="history-match-item history-match-item--compact">
+      <span class="htft-chip htft-chip--${htftChipClass(htft)}">${htft || "——"}</span>
+      ${when ? `<span class="history-match-when">${when}</span>` : ""}
+      <span class="history-match-body">${teamLabel(match.home)} ${ft} ${teamLabel(match.away)}${ht ? `（${ht}）` : ""}</span>
+    </div>`;
+}
+
+function renderTrendsDetail(match, homeMatches, awayMatches, h2hMatches) {
+  if (!isTrendsDetailOpen(match)) return;
+  const league = match.leagueShort || match.league || match.group || "";
+  els.subContent.innerHTML = `
+    <header class="trend-detail-head" data-trend-match="${match.id}">
+      <p class="trend-detail-meta">${match.beijingTime || "待定"}${match.num ? ` · ${match.num}` : ""}${league ? ` · ${league}` : ""}</p>
+      <p class="trend-detail-teams"><span>${teamLabel(match.home)}</span><span class="trend-row-vs">对</span><span>${teamLabel(match.away)}</span></p>
+    </header>
+    ${trendH2hBlockHtml(h2hMatches, match.home)}
+    ${trendTeamBlockHtml(match.home, homeMatches, match)}
+    ${trendTeamBlockHtml(match.away, awayMatches, match)}
   `;
-
-  document.getElementById("btn-export-bundle")?.addEventListener("click", () => {
-    runContentExport().catch((err) => {
-      console.error(err);
-      state.exportBusy = false;
-      renderExport();
-      showToast(err?.message || "导出失败");
-    });
-  });
-
-  const fileInput = document.getElementById("import-excel-input");
-  document.getElementById("btn-import-excel")?.addEventListener("click", () => fileInput?.click());
-  fileInput?.addEventListener("change", () => {
-    const file = fileInput.files?.[0];
-    fileInput.value = "";
-    if (!file) return;
-    runExcelImport(file).catch((err) => {
-      console.error(err);
-      state.exportBusy = false;
-      renderExport();
-      showToast(err?.message || "导入核对失败");
-    });
-  });
+  scheduleTeamNameMarquee(els.subContent);
 }
 
-const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
-const TWO_YEAR_MS = 2 * ONE_YEAR_MS;
-
-/** 导出用共同对手：先近1年最多5个；没有再近2年；仍没有则不出图 */
-function buildExportCommonOpponents(match, form) {
-  const homeMatches = form.scoreHome || form.home || [];
-  const awayMatches = form.scoreAway || form.away || [];
-  const oneYear = buildCommonOpponentsAnalysis(match.home, match.away, homeMatches, awayMatches, {
-    limit: 5,
-    withinMs: ONE_YEAR_MS,
-  });
-  if (oneYear?.items?.length) {
-    return { ...oneYear, windowLabel: "近1年" };
-  }
-  const twoYear = buildCommonOpponentsAnalysis(match.home, match.away, homeMatches, awayMatches, {
-    limit: 5,
-    withinMs: TWO_YEAR_MS,
-  });
-  if (twoYear?.items?.length) {
-    return { ...twoYear, windowLabel: "近2年" };
-  }
-  return null;
+function collectLocalH2h(home, away, limit) {
+  return (state.allMatches || [])
+    .filter((m) => m.finished && m.homeScore != null && m.awayScore != null)
+    .filter((m) => {
+      const homeSide = resolveTeamInMatch(m, home);
+      const awaySide = resolveTeamInMatch(m, away);
+      return homeSide && awaySide && homeSide !== awaySide;
+    })
+    .sort((a, b) => String(b.date || b.beijingDateKey || "").localeCompare(String(a.date || a.beijingDateKey || "")))
+    .slice(0, limit);
 }
 
-async function collectMatchExportData(match, onProgress) {
-  onProgress?.("拉取近况与共同对手…");
-  const [form, injury] = await Promise.all([
-    loadPredictionForm(match),
-    fetchInjuryAnalysis(match).catch(() => null),
-  ]);
-  form.commonOpponents = buildExportCommonOpponents(match, form);
-
-  // 批量导出优先用缓存机构观点；未缓存则用近况/伤停生成，避免逐场抓网页过慢
-  let analysis = state.predictionCache.get(match.id);
-  if (!analysis || analysis.schema !== ANALYSIS_SCHEMA) {
-    analysis = {
-      schema: ANALYSIS_SCHEMA,
-      sources: [],
-      consensus: { pick: null, bullets: [], goals: null },
-      injury,
-      stakes: buildMatchStakes(match, null, { form, injury }),
-    };
-  } else {
-    analysis = {
-      ...analysis,
-      injury: analysis.injury || injury,
-      stakes: refreshMatchStakes(match, { ...analysis, injury: analysis.injury || injury }, form),
-    };
+function mergeTrendH2h(remote, local, limit) {
+  const map = new Map();
+  for (const m of [...(remote || []), ...(local || [])]) {
+    if (!m?.finished) continue;
+    const key = String(m.id || `${m.date}-${m.home}-${m.away}`);
+    if (!map.has(key)) map.set(key, m);
   }
-  analysis = { ...analysis, form };
-  const scoreOutlook = buildScoreOutlook(match, form, analysis.consensus?.goals);
+  return [...map.values()]
+    .sort((a, b) => String(b.date || b.beijingDateKey || "").localeCompare(String(a.date || a.beijingDateKey || "")))
+    .slice(0, limit);
+}
 
-  onProgress?.("绘制竖屏综合战绩图…");
-  const historyPng = await renderMatchHistoryBundleImage(match, {
-    homeMatches: form.home,
-    awayMatches: form.away,
-    h2hMatches: form.h2h || [],
-    commonOpponents: form.commonOpponents,
-  });
+function mergeTrendSide(remote, extra, limit) {
+  const map = new Map();
+  for (const m of [...(remote || []), ...(extra || [])]) {
+    if (!m?.finished || m.homeScore == null || m.awayScore == null) continue;
+    const key = String(m.id || `${m.date}-${m.home}-${m.away}-${m.homeScore}`);
+    if (!map.has(key)) map.set(key, m);
+  }
+  return [...map.values()]
+    .sort((a, b) => String(b.date || b.beijingDateKey || "").localeCompare(String(a.date || a.beijingDateKey || "")))
+    .slice(0, limit);
+}
 
-  return {
-    match,
-    form,
-    analysis,
-    scoreOutlook,
-    historyPng,
-    excelRow: {
-      num: match.num || String(match.id),
-      league: match.leagueShort || match.league || "",
-      matchup: `${match.home} VS ${match.away}`,
-      analysis: buildExcelBriefAnalysis(match, form, analysis, scoreOutlook),
-      outcome: buildExcelOutcomeLabel(analysis, scoreOutlook, match),
-      half: buildExcelHalfFullLabel(match, form, scoreOutlook),
-      scores: buildExcelScoreLabel(scoreOutlook),
-      matchId: match.id != null ? String(match.id) : "",
-    },
+async function loadTrendHistories(match) {
+  const cached = state.trendsCache.get(match.id);
+  if (cached?.complete) return cached;
+
+  const histories = await fetchTeamHistories(match.id, TREND_MATCH_LIMIT).catch(() => null);
+  let homeMatches = pickTeamHistory(histories, match.home, "home", TREND_MATCH_LIMIT);
+  let awayMatches = pickTeamHistory(histories, match.away, "away", TREND_MATCH_LIMIT);
+
+  if (homeMatches.length < TREND_MATCH_LIMIT || awayMatches.length < TREND_MATCH_LIMIT) {
+    const [extraHome, extraAway] = await Promise.all([
+      homeMatches.length < TREND_MATCH_LIMIT
+        ? fetchTeamRecentForm(match.home, {
+            matchId: match.id,
+            bridgeMatchId: findLocalBridgeMatchId(match.home, state.allMatches, match.id),
+            localMatches: state.allMatches,
+            limit: TREND_MATCH_LIMIT,
+            sideHint: "home",
+          }).catch(() => [])
+        : Promise.resolve([]),
+      awayMatches.length < TREND_MATCH_LIMIT
+        ? fetchTeamRecentForm(match.away, {
+            matchId: match.id,
+            bridgeMatchId: findLocalBridgeMatchId(match.away, state.allMatches, match.id),
+            localMatches: state.allMatches,
+            limit: TREND_MATCH_LIMIT,
+            sideHint: "away",
+          }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    homeMatches = mergeTrendSide(homeMatches, extraHome, TREND_MATCH_LIMIT);
+    awayMatches = mergeTrendSide(awayMatches, extraAway, TREND_MATCH_LIMIT);
+  }
+
+  const packed = {
+    homeMatches,
+    awayMatches,
+    h2hMatches: mergeTrendH2h(
+      getH2hList(histories, TREND_H2H_LIMIT),
+      collectLocalH2h(match.home, match.away, TREND_H2H_LIMIT),
+      TREND_H2H_LIMIT
+    ),
+    complete: homeMatches.length > 0 || awayMatches.length > 0,
   };
+  if (packed.complete) state.trendsCache.set(match.id, packed);
+  return packed;
 }
 
-async function runContentExport() {
-  const matches = purchasableMatches();
-  if (!matches.length) {
-    showToast("当前没有可购买场次");
-    return;
-  }
-  if (state.exportBusy) return;
-  state.exportBusy = true;
-  renderExport();
+async function openTrendsDetail(match) {
+  els.subTitle.textContent = "半全场走势";
+  els.subContent.innerHTML = `
+    <header class="trend-detail-head" data-trend-match="${match.id}">
+      <p class="trend-detail-meta">${match.beijingTime || "待定"}${match.num ? ` · ${match.num}` : ""}</p>
+      <p class="trend-detail-teams"><span>${teamLabel(match.home)}</span><span class="trend-row-vs">对</span><span>${teamLabel(match.away)}</span></p>
+    </header>
+    <div class="loading"><div class="spinner"></div><span>加载近 ${TREND_MATCH_LIMIT} 场与交手记录…</span></div>
+  `;
+  showSubPage();
 
+  state.trendsLoadingId = match.id;
   try {
-    setExportStatus("准备依赖库…");
-    await loadDeps();
-
-    const excelRows = [];
-    const dayMap = new Map();
-
-    for (let i = 0; i < matches.length; i += 1) {
-      const match = matches[i];
-      const label = match.num || `${match.home} VS ${match.away}`;
-      setExportStatus(`处理 ${i + 1}/${matches.length}：${label}`);
-      const packed = await collectMatchExportData(match, (step) => {
-        setExportStatus(`处理 ${i + 1}/${matches.length}：${label} · ${step}`);
-      });
-      excelRows.push(packed.excelRow);
-
-      const dayKey = dateFolderName(match);
-      if (!dayMap.has(dayKey)) dayMap.set(dayKey, { name: dayKey, matches: [] });
-      dayMap.get(dayKey).matches.push({
-        folder: matchFolderName(match),
-        historyPng: packed.historyPng,
-      });
-    }
-
-    setExportStatus("生成 Excel…");
-    const excelBlob = await buildPredictionsWorkbook(excelRows);
-
-    setExportStatus("打包 ZIP…");
-    const dayFolders = [...dayMap.values()].sort((a, b) => a.name.localeCompare(b.name));
-    await packExportZip({
-      dayFolders,
-      excelBlob,
-      zipName: `${stamp().slice(0, 8)}.zip`,
-    });
-
-    setExportStatus(`已导出 ${matches.length} 场（含图片与预测表）`);
-    showToast("导出完成");
-  } finally {
-    state.exportBusy = false;
-    const status = document.getElementById("export-status")?.textContent || "";
-    renderExport();
-    setExportStatus(status);
-  }
-}
-
-async function runExcelImport(file) {
-  if (state.exportBusy) return;
-  state.exportBusy = true;
-  renderExport();
-  try {
-    setExportStatus("补拉近期赛果…");
-    await loadDeps();
-    try {
-      const data = await fetchLatestLotteryData();
-      applyFetchedData(data);
-    } catch {
-      /* 沿用内存数据 */
-    }
-
-    let finished = getFinishedLotteryMatches(state.allMatches, state.history);
-    if (!finished.length) {
-      setExportStatus("当前没有已完赛数据，无法核对。请检查网络后点「立即检索」再试");
-      showToast("无完赛数据，未能核对");
-      return;
-    }
-
-    setExportStatus(`读取 Excel 并核对赛果（已完赛 ${finished.length} 场）…`);
-    const result = await gradeImportedWorkbook(file, finished);
-    downloadBlob(result.blob, `预测核对_${stamp()}.xlsx`);
-    setExportStatus(
-      `已按导入表内容核对 ${result.graded} 场：胜负命中 ${result.outcomeHits} · 半全场命中 ${result.halfHits ?? 0} · 比分命中 ${result.scoreHits}${
-        result.pending ? ` · 未完赛/未匹配 ${result.pending}` : ""
-      }`
+    const packed = await loadTrendHistories(match);
+    if (state.trendsLoadingId !== match.id) return;
+    renderTrendsDetail(match, packed.homeMatches, packed.awayMatches, packed.h2hMatches);
+  } catch (err) {
+    console.error(err);
+    if (!isTrendsDetailOpen(match)) return;
+    const localHome = collectLocalTeamMatches(state.allMatches, match.home, TREND_MATCH_LIMIT).filter(
+      (m) => m.finished && m.id !== match.id
     );
-    showToast(result.graded ? "核对完成，已下载标红表" : "未匹配到完赛场次，请确认表内场次编号/对阵");
+    const localAway = collectLocalTeamMatches(state.allMatches, match.away, TREND_MATCH_LIMIT).filter(
+      (m) => m.finished && m.id !== match.id
+    );
+    renderTrendsDetail(
+      match,
+      localHome,
+      localAway,
+      collectLocalH2h(match.home, match.away, TREND_H2H_LIMIT)
+    );
+    showToast("远程战绩加载失败，已显示本地记录");
   } finally {
-    state.exportBusy = false;
-    const status = document.getElementById("export-status")?.textContent || "";
-    renderExport();
-    setExportStatus(status);
+    if (state.trendsLoadingId === match.id) state.trendsLoadingId = null;
   }
 }
 

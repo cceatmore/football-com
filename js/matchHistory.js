@@ -13,7 +13,7 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 async function fetchUniform(path) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+  const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(`${UNIFORM_BASE}/${path}`, {
       headers: FETCH_HEADERS,
@@ -183,11 +183,29 @@ export async function fetchTeamHistories(matchId, termLimits = RECENT_MATCH_LIMI
     h2h: (h2h?.matchList || []).map((m) => normalizeUniformHistoryMatch(m)),
   };
 
-  // 失败/空结果不缓存，避免偶发网络问题把近况永久置空
+  // 失败/空结果不缓存；后返回的更小 termLimits 不能覆盖已经拿到的更长列表
   if (payload.home.length || payload.away.length || payload.h2h.length) {
-    cache.set(matchId, payload);
+    const prev = cache.get(matchId);
+    if (!prev || (payload.termLimits || 0) >= (prev.termLimits || 0)) cache.set(matchId, payload);
   }
   return payload;
+}
+
+function finishedHistory(list) {
+  return (list || []).filter((m) => m?.finished && m.homeScore != null && m.awayScore != null);
+}
+
+/** 走势用：直接取该侧近况，不够再从两侧里按队名补 */
+export function pickTeamHistory(histories, team, sideHint, limit = RECENT_MATCH_LIMIT) {
+  const preferred = finishedHistory(sideHint === "away" ? histories?.away : histories?.home);
+  const scanned = finishedHistory(
+    [...(histories?.home || []), ...(histories?.away || [])].filter((m) => {
+      const resolved = resolveTeamInMatch(m, team);
+      return resolved === m.home || resolved === m.away;
+    })
+  );
+  const list = preferred.length >= scanned.length ? preferred : scanned;
+  return list.slice(0, limit);
 }
 
 export function getTeamHistoryList(histories, side, localMatches, team, excludeMatchId = null, limit = RECENT_MATCH_LIMIT) {

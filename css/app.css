@@ -2760,106 +2760,205 @@ html, body {
   text-decoration: none;
 }
 
-/* —— 内容导出 —— */
-.export-page {
-  padding: 4px 0 24px;
-}
-
-.export-intro {
+/* —— 近15场 / 半全场走势 —— */
+.trends-intro,
+.trends-detail-note {
   font-size: 13px;
   line-height: 1.65;
   color: var(--text-secondary);
-  margin-bottom: 14px;
-}
-
-.export-stat-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 18px 16px;
-  text-align: center;
-  margin-bottom: 14px;
-}
-
-.export-stat-value {
-  font-size: 36px;
-  font-weight: 700;
-  color: var(--primary);
-  line-height: 1.1;
-}
-
-.export-stat-label {
-  margin-top: 4px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.export-stat-meta {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
-.export-btn {
-  margin-bottom: 10px;
-}
-
-.export-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.export-btn--secondary {
-  border-color: var(--border);
-  background: var(--surface);
-  color: var(--text);
-}
-
-.export-btn--secondary:active {
-  background: var(--bg);
-}
-
-.export-status {
-  min-height: 20px;
-  margin: 8px 0 12px;
-  font-size: 12px;
-  color: var(--primary);
-  line-height: 1.5;
-  word-break: break-all;
-}
-
-.export-tips {
-  list-style: none;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 12px 14px;
   margin-bottom: 12px;
 }
 
-.export-tips li {
-  position: relative;
-  padding-left: 14px;
+.trend-day {
+  margin-bottom: 16px;
+}
+
+.trend-day-label {
+  margin: 0 2px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.trend-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+
+.trend-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.6;
-  margin-bottom: 6px;
 }
 
-.export-tips li:last-child {
-  margin-bottom: 0;
+.trend-row-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--primary);
 }
 
-.export-tips li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.55em;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--primary);
+.trend-row-num {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.trend-row-league {
+  margin-left: auto;
+}
+
+.trend-row-matchup,
+.trend-detail-teams {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.trend-row-team {
+  flex: 1;
+  min-width: 0;
+}
+
+.trend-row-matchup .trend-row-team:last-child,
+.trend-detail-teams span:last-child {
+  text-align: right;
+}
+
+.trend-row-vs {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.trend-detail-head {
+  margin-bottom: 12px;
+  padding: 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.trend-detail-meta {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.trend-block-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.trend-h2h {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.trends-detail-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.trend-side {
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.htft-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 6px;
+}
+
+.htft-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  padding: 2px 5px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  background: var(--bg);
+  color: var(--text-secondary);
+}
+
+.htft-chip--ww {
+  background: #bbf7d0;
+  color: #047857;
+}
+
+.htft-chip--fw {
+  background: #d1fae5;
+  color: #059669;
+}
+
+.htft-chip--dd {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.htft-chip--mid {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.htft-chip--fl {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.htft-chip--ll {
+  background: #fecaca;
+  color: #991b1b;
+}
+
+.htft-chip--flip {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.htft-chip--pending {
+  background: var(--bg);
+  color: var(--muted);
+}
+
+.htft-empty,
+.htft-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.trend-team-block .history-matches-list {
+  margin-top: 4px;
 }
